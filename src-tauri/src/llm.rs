@@ -89,10 +89,7 @@ pub async fn natural_language_to_sql_with_tools(
     let db_names: Vec<&str> = all_schemas.iter().map(|s| s.database.as_str()).collect();
     let db_list = db_names.join(", ");
 
-    // Track seen tool calls to prevent loops
     let mut seen_tool_calls: Vec<String> = Vec::new();
-
-    // Build conversation history as plain text
     let mut conversation = String::new();
 
     for iteration in 0..max_iterations {
@@ -137,8 +134,7 @@ pub async fn natural_language_to_sql_with_tools(
 
         eprintln!("[LLM] Raw response (first 300 chars): {}", text.chars().take(300).collect::<String>());
 
-        // Properly strip ALL markdown code blocks: ```lang\n...\n```
-        // Just remove lines that start with ``` and keep everything else
+        // Strip markdown code blocks by filtering backtick lines
         text = text.lines()
             .filter(|line| !line.trim().starts_with("```"))
             .collect::<Vec<_>>()
@@ -148,21 +144,51 @@ pub async fn natural_language_to_sql_with_tools(
 
         eprintln!("[LLM] After strip: {}", text.chars().take(300).collect::<String>());
 
-        // Try to find a JSON tool call anywhere in the response
+        // Try to parse as JSON tool call
         let mut found_tool = false;
 
-        // Try the whole text first
         if let Ok(tool_call) = serde_json::from_str::<serde_json::Value>(&text) {
             if let Some(tool_name) = tool_call.get("tool").and_then(|v| v.as_str()) {
-                found_tool = process_tool_call(tool_name, &tool_call, all_schemas, &db_list, &mut conversation, &mut seen_tool_calls)?;
+                let call_sig = tool_call.to_string();
+                if seen_tool_calls.contains(&call_sig) {
+                    // Repeated call → fallback immediately with accumulated conversation
+                    eprintln!("[LLM] Repeated tool call, using conversation context for fallback");
+                    let fallback_prompt = format!(
+                        "You are a MySQL 5.6+ expert. Based on the schema information gathered below, \
+                         write a SQL query to answer the user's question.\n\
+                         Only return the SQL query, no explanations, no markdown.\n\n\
+                         {conversation}\n\n\
+                         User's question: {natural_language}\n\n\
+                         SQL Query:",
+                    );
+                    return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt).await;
+                }
+                seen_tool_calls.push(call_sig);
+
+                found_tool = process_tool_call(tool_name, &tool_call, all_schemas, &db_list, &mut conversation)?;
             }
         }
 
-        // If not found, try to extract JSON from anywhere in the text
+        // If not parsed as whole JSON, try extracting from mixed content
         if !found_tool {
             if let Some(tool_call) = extract_first_json_object(&text) {
                 if let Some(tool_name) = tool_call.get("tool").and_then(|v| v.as_str()) {
-                    found_tool = process_tool_call(tool_name, &tool_call, all_schemas, &db_list, &mut conversation, &mut seen_tool_calls)?;
+                    let call_sig = tool_call.to_string();
+                    if seen_tool_calls.contains(&call_sig) {
+                        eprintln!("[LLM] Repeated tool call (extracted), using conversation context for fallback");
+                        let fallback_prompt = format!(
+                            "You are a MySQL 5.6+ expert. Based on the schema information gathered below, \
+                             write a SQL query to answer the user's question.\n\
+                             Only return the SQL query, no explanations, no markdown.\n\n\
+                             {conversation}\n\n\
+                             User's question: {natural_language}\n\n\
+                             SQL Query:",
+                        );
+                        return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt).await;
+                    }
+                    seen_tool_calls.push(call_sig);
+
+                    found_tool = process_tool_call(tool_name, &tool_call, all_schemas, &db_list, &mut conversation)?;
                 }
             }
         }
@@ -171,24 +197,74 @@ pub async fn natural_language_to_sql_with_tools(
             continue;
         }
 
-        // Not a tool call — treat as final SQL
+        // Not a tool call — extract SQL
         let sql = extract_sql(&text);
 
-        // If SQL is empty or looks like JSON, fall back to single-prompt
-        if sql.is_empty() || sql.starts_with('{') || sql.contains("\"tool\":") {
-            eprintln!("[LLM] No valid SQL, falling back to single-prompt");
-            let schema_context = schema::format_all_schemas_for_prompt(all_schemas);
-            return natural_language_to_sql(natural_language, &schema_context).await;
+        if !sql.is_empty() && !sql.starts_with('{') && !sql.contains("\"tool\":") {
+            eprintln!("[LLM] Final SQL: {}", sql.chars().take(100).collect::<String>());
+            return Ok(sql);
         }
 
-        eprintln!("[LLM] Final SQL: {}", sql.chars().take(100).collect::<String>());
-        return Ok(sql);
+        // No valid SQL — fallback with conversation context
+        eprintln!("[LLM] No valid SQL from tool iteration, using conversation context for fallback");
+        let fallback_prompt = format!(
+            "You are a MySQL 5.6+ expert. Based on the schema information gathered below, \
+             write a SQL query to answer the user's question.\n\
+             Only return the SQL query, no explanations, no markdown.\n\n\
+             {conversation}\n\n\
+             User's question: {natural_language}\n\n\
+             SQL Query:",
+        );
+        return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt).await;
     }
 
-    // Max iterations reached, fall back to single-prompt
-    eprintln!("[LLM] Max iterations reached, falling back to single-prompt");
+    // Max iterations → fallback with all schemas
+    eprintln!("[LLM] Max iterations reached, using all schemas for fallback");
     let schema_context = schema::format_all_schemas_for_prompt(all_schemas);
     natural_language_to_sql(natural_language, &schema_context).await
+}
+
+async fn call_ollama_generate(
+    url: &str,
+    model: &str,
+    client: &reqwest::Client,
+    api_url: &str,
+    prompt: &str,
+) -> Result<String, AppError> {
+    let response = client
+        .post(api_url)
+        .json(&json!({
+            "model": model,
+            "prompt": prompt,
+            "stream": false,
+            "temperature": 0.1,
+        }))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(AppError::QueryExecution(
+            format!("Ollama returned status: {}", response.status())
+        ));
+    }
+
+    #[derive(Deserialize)]
+    struct OllamaResp { response: String }
+
+    let body: OllamaResp = response.json().await?;
+    let sql = body.response.trim()
+        .trim_start_matches("```sql")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim()
+        .to_string();
+
+    if sql.is_empty() {
+        return Err(AppError::InvalidLlmResponse);
+    }
+
+    eprintln!("[LLM] Fallback SQL: {}", sql.chars().take(100).collect::<String>());
+    Ok(sql)
 }
 
 fn extract_first_json_object(text: &str) -> Option<serde_json::Value> {
@@ -229,15 +305,7 @@ fn process_tool_call(
     all_schemas: &[Schema],
     db_list: &str,
     conversation: &mut String,
-    seen_tool_calls: &mut Vec<String>,
 ) -> Result<bool, AppError> {
-    let call_sig = tool_call.to_string();
-    if seen_tool_calls.contains(&call_sig) {
-        eprintln!("[LLM] Repeated tool call, falling back to single-prompt");
-        return Ok(false); // Signal caller to use fallback
-    }
-    seen_tool_calls.push(call_sig);
-
     eprintln!("[LLM] Tool call: {tool_name}");
 
     match tool_name {
