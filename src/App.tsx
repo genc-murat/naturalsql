@@ -31,7 +31,9 @@ function App() {
   const [showLlmConfig, setShowLlmConfig] = useState(false);
   const [llmConfig, setLlmConfig] = useState<LlmConfigResponse | null>(null);
   const [editorHeight, setEditorHeight] = useState(280);
+  const [sidebarWidth, setSidebarWidth] = useState(288); // w-72 = 288px
   const [isDragging, setIsDragging] = useState(false);
+  const [isSidebarDragging, setIsSidebarDragging] = useState(false);
   const mainAreaRef = useRef<HTMLDivElement>(null);
 
   // Load LLM config and cached databases on mount
@@ -65,6 +67,29 @@ function App() {
       document.body.style.cursor = "";
     };
   }, [isDragging]);
+
+  // Sidebar resize drag handler
+  useEffect(() => {
+    if (!isSidebarDragging) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      setSidebarWidth(Math.max(200, Math.min(500, e.clientX)));
+    };
+
+    const handleMouseUp = () => setIsSidebarDragging(false);
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+  }, [isSidebarDragging]);
 
   // Parse database name from connection string
   const parseDatabaseFromUrl = (url: string): string | null => {
@@ -206,7 +231,10 @@ function App() {
       {/* Main Content */}
       <div ref={mainAreaRef} className="flex flex-1 overflow-hidden">
         {/* Sidebar - Schema Browser */}
-        <aside className="w-72 border-r border-[var(--border)] bg-[var(--bg-secondary)] flex flex-col">
+        <aside
+          className="border-r border-[var(--border)] bg-[var(--bg-secondary)] flex flex-col shrink-0"
+          style={{ width: sidebarWidth }}
+        >
           <div className="px-3 py-2 border-b border-[var(--border)]">
             <h2 className="text-sm font-semibold text-[var(--text-secondary)]">
               Databases
@@ -231,6 +259,14 @@ function App() {
             </div>
           )}
         </aside>
+
+        {/* Vertical Resize Divider */}
+        <div
+          className="w-1.5 cursor-col-resize group flex flex-col items-center justify-center shrink-0 bg-[var(--border)] hover:bg-[var(--accent)]/30 transition-colors"
+          onMouseDown={() => setIsSidebarDragging(true)}
+        >
+          <div className="h-16 w-1 rounded-full bg-[var(--text-muted)]/40 group-hover:bg-[var(--accent)] transition-colors" />
+        </div>
 
         {/* Main Area */}
         <main className="flex-1 flex flex-col overflow-hidden">
