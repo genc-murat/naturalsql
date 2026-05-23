@@ -86,39 +86,31 @@ pub async fn natural_language_to_sql_with_tools(
     let api_url = format!("{}/api/generate", url.trim_end_matches('/'));
     let max_iterations = 10;
 
-    // Build the available databases list for context
     let db_names: Vec<&str> = all_schemas.iter().map(|s| s.database.as_str()).collect();
     let db_list = db_names.join(", ");
+
+    // Track seen tool calls to prevent loops
+    let mut seen_tool_calls: Vec<String> = Vec::new();
+
+    // Build conversation history as plain text
+    let mut conversation = String::new();
 
     for iteration in 0..max_iterations {
         eprintln!("[LLM] Tool iteration {}/{}", iteration + 1, max_iterations);
 
-        // Build prompt with instruction to use tools via JSON
-        let tools_instructions = format!(
+        let prompt = format!(
             "You are a MySQL expert. Available databases: {db_list}\n\n\
-             You have access to these tools. Use them by outputting a JSON object on a single line:\n\
-             \n\
-             Tool: list_tables\n\
-             Use when: you need to see what tables exist in a database\n\
-             JSON format: {{\"tool\": \"list_tables\", \"database\": \"<db_name>\"}}\n\
-             \n\
-             Tool: get_table_schema\n\
-             Use when: you need column definitions for a specific table\n\
-             JSON format: {{\"tool\": \"get_table_schema\", \"database\": \"<db_name>\", \"table\": \"<table_name>\"}}\n\
-             \n\
-             Tool: get_sample_data\n\
-             Use when: you need to see example values from a table\n\
-             JSON format: {{\"tool\": \"get_sample_data\", \"database\": \"<db_name>\", \"table\": \"<table_name>\"}}\n\
-             \n\
+             You have access to tools. Use them by outputting a JSON object:\n\
+             - {{\"tool\": \"list_tables\", \"database\": \"<db_name>\"}}\n\
+             - {{\"tool\": \"get_table_schema\", \"database\": \"<db_name>\", \"table\": \"<table_name>\"}}\n\
+             - {{\"tool\": \"get_sample_data\", \"database\": \"<db_name>\", \"table\": \"<table_name>\"}}\n\n\
              When you have enough information, write ONLY the SQL query. No explanations, no markdown, no backticks.\n\
              Always use fully qualified table names: database.table\n\
-             \n\
-             IMPORTANT: If you need a tool, output ONLY the JSON object. If you're ready to write SQL, output ONLY the SQL.\n\
+             IMPORTANT: If you need a tool, output ONLY the JSON. If you're ready, output ONLY the SQL.\n\
+             Do NOT repeat the same tool call — use the results below to decide your next step.\n\n\
+             {conversation}\n\n\
              User's question: {natural_language}",
         );
-
-        // Add tool results from previous iterations as context
-        let mut prompt = tools_instructions.clone();
 
         let response = client
             .post(&api_url)
@@ -138,87 +130,205 @@ pub async fn natural_language_to_sql_with_tools(
         }
 
         #[derive(Deserialize)]
-        struct OllamaResp {
-            response: String,
-        }
+        struct OllamaResp { response: String }
 
         let body: OllamaResp = response.json().await?;
-        let text = body.response.trim().to_string();
+        let mut text = body.response.trim().to_string();
 
-        eprintln!("[LLM] Raw response (first 200 chars): {}", text.chars().take(200).collect::<String>());
+        eprintln!("[LLM] Raw response (first 300 chars): {}", text.chars().take(300).collect::<String>());
 
-        // Try to parse as JSON tool call
-        if let Ok(tool_call) = serde_json::from_str::<serde_json::Value>(&text) {
-            if let Some(tool_name) = tool_call.get("tool").and_then(|v| v.as_str()) {
-                eprintln!("[LLM] Tool call detected: {tool_name}");
-
-                match tool_name {
-                    "list_tables" => {
-                        let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
-                        if let Some(schema) = all_schemas.iter().find(|s| s.database == database) {
-                            let tables: Vec<&str> = schema.tables.iter().map(|t| t.name.as_str()).collect();
-                            let result = format!("Tables in '{}': {}", database, tables.join(", "));
-                            prompt = format!("{}\n\nTool result: {result}\n\nNow, what's your next step? Output JSON for another tool call, or the final SQL query.", prompt);
-                            eprintln!("[LLM] Tool result: {result}");
-                        } else {
-                            prompt = format!("{}\n\nTool error: Database '{}' not found. Available: {}", prompt, database, db_list);
-                        }
-                    }
-                    "get_table_schema" => {
-                        let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
-                        let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
-                        if let Some(schema) = all_schemas.iter().find(|s| s.database == database) {
-                            if let Some(tbl) = schema.tables.iter().find(|t| t.name == table) {
-                                let cols: Vec<String> = tbl.columns.iter().map(|c| {
-                                    let key = if !c.column_key.is_empty() {
-                                        format!(" [{}]", c.column_key)
-                                    } else { "".to_string() };
-                                    format!("  {} {}{}{}", c.name, c.column_type, key,
-                                        if c.is_nullable { " NULL" } else { " NOT NULL" })
-                                }).collect();
-                                let result = format!("Table {}.{} columns:\n{}", database, table, cols.join("\n"));
-                                prompt = format!("{}\n\nTool result: {result}\n\nNow, what's your next step? Output JSON for another tool call, or the final SQL query.", prompt);
-                                eprintln!("[LLM] Tool result: {}", result.chars().take(100).collect::<String>());
-                            } else {
-                                prompt = format!("{}\n\nTool error: Table '{}' not found in '{}'", prompt, table, database);
-                            }
-                        } else {
-                            prompt = format!("{}\n\nTool error: Database '{}' not found", prompt, database);
-                        }
-                    }
-                    "get_sample_data" => {
-                        let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
-                        let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
-                        let result = format!("Sample data query would run: SELECT * FROM {database}.{table} LIMIT 3");
-                        prompt = format!("{}\n\nTool result: {result}\n\nNow, what's your next step? Output JSON for another tool call, or the final SQL query.", prompt);
-                        eprintln!("[LLM] Tool result: {result}");
-                    }
-                    _ => {
-                        prompt = format!("{}\n\nTool error: Unknown tool '{}'", prompt, tool_name);
-                    }
+        // Strip ALL markdown code block wrappers first
+        while text.starts_with("```") {
+            // Find the closing ```
+            if let Some(end) = text[3..].find("```") {
+                let inner = text[3..3+end].trim();
+                let after = text[3+end+3..].trim();
+                // If there's content after the code block, keep it
+                if after.is_empty() {
+                    text = inner.to_string();
+                } else {
+                    // Multiple blocks — keep everything
+                    break;
                 }
-                continue; // Go to next iteration
+            } else {
+                break;
             }
         }
 
-        // Not a tool call — treat as final SQL
-        let sql = text
-            .trim_start_matches("```sql")
-            .trim_start_matches("```")
-            .trim_end_matches("```")
-            .trim()
-            .to_string();
+        eprintln!("[LLM] After strip: {}", text.chars().take(300).collect::<String>());
 
-        // Also handle markdown-wrapped SQL
-        let sql = sql.trim().to_string();
+        // Try to find a JSON tool call anywhere in the response
+        let mut found_tool = false;
+
+        // Try the whole text first
+        if let Ok(tool_call) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(tool_name) = tool_call.get("tool").and_then(|v| v.as_str()) {
+                found_tool = process_tool_call(tool_name, &tool_call, all_schemas, &db_list, &mut conversation, &mut seen_tool_calls)?;
+            }
+        }
+
+        // If not found, try to extract JSON from the beginning of the text
+        if !found_tool {
+            // Look for JSON object starting with {
+            if let Some(start) = text.find('{') {
+                // Try to find matching closing brace
+                let from_start = &text[start..];
+                if let Some(tool_call) = extract_first_json_object(from_start) {
+                    if let Some(tool_name) = tool_call.get("tool").and_then(|v| v.as_str()) {
+                        found_tool = process_tool_call(tool_name, &tool_call, all_schemas, &db_list, &mut conversation, &mut seen_tool_calls)?;
+                    }
+                }
+            }
+        }
+
+        if found_tool {
+            continue;
+        }
+
+        // Not a tool call — treat as final SQL
+        let sql = extract_sql(&text);
 
         if sql.is_empty() {
             return Err(AppError::InvalidLlmResponse);
         }
 
-        eprintln!("[LLM] Final SQL (first 100 chars): {}", sql.chars().take(100).collect::<String>());
+        eprintln!("[LLM] Final SQL: {}", sql.chars().take(100).collect::<String>());
         return Ok(sql);
     }
 
     Err(AppError::InvalidLlmResponse)
+}
+
+fn extract_first_json_object(text: &str) -> Option<serde_json::Value> {
+    let start = text.find('{')?;
+    let from_start = &text[start..];
+
+    // Count braces to find the matching closing brace
+    let mut depth = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+
+    for (i, c) in from_start.char_indices() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+        match c {
+            '\\' if in_string => escape_next = true,
+            '"' => in_string = !in_string,
+            '{' if !in_string => depth += 1,
+            '}' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&from_start[..=i]) {
+                        return Some(val);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn process_tool_call(
+    tool_name: &str,
+    tool_call: &serde_json::Value,
+    all_schemas: &[Schema],
+    db_list: &str,
+    conversation: &mut String,
+    seen_tool_calls: &mut Vec<String>,
+) -> Result<bool, AppError> {
+    let call_sig = tool_call.to_string();
+    if seen_tool_calls.contains(&call_sig) {
+        eprintln!("[LLM] Repeated tool call, forcing SQL");
+        conversation.push_str("\n\nYou already called this tool. Now write the SQL query. Output ONLY the SQL.");
+        return Ok(false);
+    }
+    seen_tool_calls.push(call_sig);
+
+    eprintln!("[LLM] Tool call: {tool_name}");
+
+    match tool_name {
+        "list_tables" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(schema) = all_schemas.iter().find(|s| s.database == database) {
+                let tables: Vec<&str> = schema.tables.iter().map(|t| t.name.as_str()).collect();
+                let result = format!("Tables in '{}': {}", database, tables.join(", "));
+                conversation.push_str(&format!("\n\nTool result: {result}"));
+                eprintln!("[LLM] {result}");
+            } else {
+                conversation.push_str(&format!("\n\nTool error: Database '{}' not found. Available: {}", database, db_list));
+            }
+        }
+        "get_table_schema" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(schema) = all_schemas.iter().find(|s| s.database == database) {
+                if let Some(tbl) = schema.tables.iter().find(|t| t.name == table) {
+                    let cols: Vec<String> = tbl.columns.iter().map(|c| {
+                        let key = if !c.column_key.is_empty() { format!(" [{}]", c.column_key) } else { "".to_string() };
+                        format!("  {} {}{}{}", c.name, c.column_type, key, if c.is_nullable { " NULL" } else { " NOT NULL" })
+                    }).collect();
+                    let result = format!("Table {}.{} columns:\n{}", database, table, cols.join("\n"));
+                    conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                    eprintln!("[LLM] {}", result.chars().take(100).collect::<String>());
+                } else {
+                    conversation.push_str(&format!("\n\nTool error: Table '{}' not found in '{}'", table, database));
+                }
+            } else {
+                conversation.push_str(&format!("\n\nTool error: Database '{}' not found", database));
+            }
+        }
+        "get_sample_data" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            let result = format!("Sample: SELECT * FROM {database}.{table} LIMIT 3");
+            conversation.push_str(&format!("\n\nTool result: {result}"));
+        }
+        _ => {
+            conversation.push_str(&format!("\n\nTool error: Unknown tool '{tool_name}'"));
+        }
+    }
+    Ok(true)
+}
+
+fn extract_sql(text: &str) -> String {
+    let text = text.trim();
+
+    // If it's wrapped in ```sql blocks
+    let mut result = text.to_string();
+    while result.starts_with("```sql") || result.starts_with("```") {
+        let prefix = if result.starts_with("```sql") { 6 } else { 3 };
+        if let Some(end) = result[prefix..].find("```") {
+            let inner = result[prefix..prefix+end].trim();
+            let after = result[prefix+end+3..].trim();
+            result = if after.is_empty() { inner.to_string() } else { break };
+        } else {
+            break;
+        }
+    }
+
+    // Extract SQL keywords from mixed content
+    let result = result.trim();
+
+    // If it starts with SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, EXPLAIN, WITH
+    let upper = result.to_uppercase();
+    if upper.starts_with("SELECT") || upper.starts_with("INSERT") || upper.starts_with("UPDATE")
+        || upper.starts_with("DELETE") || upper.starts_with("CREATE") || upper.starts_with("DROP")
+        || upper.starts_with("ALTER") || upper.starts_with("EXPLAIN") || upper.starts_with("WITH") {
+        // Take until we hit a newline followed by non-SQL content
+        let sql: String = result.lines()
+            .take_while(|line| {
+                let t = line.trim();
+                !t.starts_with('{') && !t.starts_with("```") && !t.is_empty()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !sql.is_empty() {
+            return sql.trim().to_string();
+        }
+    }
+
+    result.to_string()
 }
