@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback, useRef } from "react";
+import { useState, useMemo, useEffect } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { sql, MySQL } from "@codemirror/lang-sql";
 import { vscodeDark, vscodeLight } from "@uiw/codemirror-theme-vscode";
@@ -40,9 +40,6 @@ export function QueryEditor({
     return window.matchMedia("(prefers-color-scheme: dark)").matches;
   });
   const [expanded, setExpanded] = useState(false);
-  const [editorHeight, setEditorHeight] = useState(240);
-  const [isDragging, setIsDragging] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
 
   // Track theme changes
   useEffect(() => {
@@ -55,37 +52,6 @@ export function QueryEditor({
     });
     return () => observer.disconnect();
   }, []);
-
-  // Resize drag handler
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    setIsDragging(true);
-  }, []);
-
-  useEffect(() => {
-    if (!isDragging) return;
-
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!containerRef.current) return;
-      const rect = containerRef.current.getBoundingClientRect();
-      const newHeight = e.clientY - rect.top;
-      setEditorHeight(Math.max(120, Math.min(600, newHeight)));
-    };
-
-    const handleMouseUp = () => setIsDragging(false);
-
-    window.addEventListener("mousemove", handleMouseMove);
-    window.addEventListener("mouseup", handleMouseUp);
-    document.body.style.userSelect = "none";
-    document.body.style.cursor = "row-resize";
-
-    return () => {
-      window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", handleMouseUp);
-      document.body.style.userSelect = "";
-      document.body.style.cursor = "";
-    };
-  }, [isDragging]);
 
   const extensions = useMemo(
     () => [
@@ -259,9 +225,9 @@ export function QueryEditor({
   }
 
   return (
-    <div ref={containerRef} className="flex flex-col">
+    <div className="flex flex-col h-full">
       {/* NL Input Bar */}
-      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--border)] bg-[var(--bg-secondary)]">
+      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--border)] bg-[var(--bg-secondary)] shrink-0">
         <Wand2 className="w-4 h-4 text-[var(--accent)] flex-shrink-0" />
         <input
           type="text"
@@ -287,14 +253,14 @@ export function QueryEditor({
       </div>
 
       {/* SQL Editor */}
-      <div style={{ height: editorHeight }}>
+      <div className="flex-1 min-h-0 overflow-hidden">
         <CodeMirror
           value={sqlText}
           onChange={(val) => setSqlText(val)}
           onKeyDown={handleKeyDown}
           extensions={extensions}
           theme={isDark ? vscodeDark : vscodeLight}
-          height={`${editorHeight}px`}
+          height="100%"
           className="text-sm [&_.cm-editor]:!h-full [&_.cm-scroller]:!overflow-auto"
           basicSetup={{
             lineNumbers: true,
@@ -318,16 +284,8 @@ export function QueryEditor({
         />
       </div>
 
-      {/* Resize Handle */}
-      <div
-        className="h-1.5 cursor-row-resize group flex items-center justify-center hover:bg-[var(--accent)]/20 transition-colors"
-        onMouseDown={handleMouseDown}
-      >
-        <div className="w-12 h-1 rounded-full bg-[var(--border)] group-hover:bg-[var(--accent)] transition-colors" />
-      </div>
-
       {/* Toolbar */}
-      <div className="flex items-center justify-between px-3 py-2 border-t border-[var(--border)] bg-[var(--bg-secondary)]">
+      <div className="flex items-center justify-between px-3 py-2 border-t border-[var(--border)] bg-[var(--bg-secondary)] shrink-0">
         <div className="flex items-center gap-1">
           <button
             onClick={handleCopy}
@@ -384,7 +342,7 @@ export function QueryEditor({
 
       {/* Error Bar */}
       {error && (
-        <div className="px-4 py-2 border-t border-red-500/20 bg-red-500/5 text-red-500 text-sm">
+        <div className="px-4 py-2 border-t border-red-500/20 bg-red-500/5 text-red-500 text-sm shrink-0">
           {error}
         </div>
       )}

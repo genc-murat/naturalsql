@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Database, ExternalLink, Settings } from "lucide-react";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { ConnectionPanel } from "./components/ConnectionPanel";
@@ -30,12 +30,41 @@ function App() {
   const [connectionString, setConnectionString] = useState("");
   const [showLlmConfig, setShowLlmConfig] = useState(false);
   const [llmConfig, setLlmConfig] = useState<LlmConfigResponse | null>(null);
+  const [editorHeight, setEditorHeight] = useState(280);
+  const [isDragging, setIsDragging] = useState(false);
+  const mainAreaRef = useRef<HTMLDivElement>(null);
 
   // Load LLM config and cached databases on mount
   useEffect(() => {
     getLlmConfig().then((cfg) => setLlmConfig(cfg)).catch(() => {});
     listCachedDatabases().then((dbs) => setCachedDatabases(dbs)).catch(() => {});
   }, []);
+
+  // Resize drag handler for editor/results divider
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!mainAreaRef.current) return;
+      const rect = mainAreaRef.current.getBoundingClientRect();
+      const newHeight = e.clientY - rect.top;
+      setEditorHeight(Math.max(150, Math.min(600, newHeight)));
+    };
+
+    const handleMouseUp = () => setIsDragging(false);
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "row-resize";
+
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+  }, [isDragging]);
 
   // Parse database name from connection string
   const parseDatabaseFromUrl = (url: string): string | null => {
@@ -175,7 +204,7 @@ function App() {
       </header>
 
       {/* Main Content */}
-      <div className="flex flex-1 overflow-hidden">
+      <div ref={mainAreaRef} className="flex flex-1 overflow-hidden">
         {/* Sidebar - Schema Browser */}
         <aside className="w-72 border-r border-[var(--border)] bg-[var(--bg-secondary)] flex flex-col">
           <div className="px-3 py-2 border-b border-[var(--border)]">
@@ -205,8 +234,8 @@ function App() {
 
         {/* Main Area */}
         <main className="flex-1 flex flex-col overflow-hidden">
-          {/* Query Editor - gives ~45% of the height */}
-          <div className="flex-[0_0_45%] min-h-[200px] border-b border-[var(--border)] bg-[var(--bg-primary)] flex flex-col">
+          {/* Query Editor Panel */}
+          <div className="flex flex-col bg-[var(--bg-primary)]" style={{ height: editorHeight }}>
             <QueryEditor
               onResult={handleResult}
               schema={schema}
@@ -214,8 +243,16 @@ function App() {
             />
           </div>
 
-          {/* Results - takes remaining space */}
-          <div className="flex-1 overflow-auto p-3 bg-[var(--bg-primary)]">
+          {/* Draggable Divider */}
+          <div
+            className="h-1.5 cursor-row-resize group flex items-center justify-center shrink-0 bg-[var(--border)] hover:bg-[var(--accent)]/30 transition-colors"
+            onMouseDown={() => setIsDragging(true)}
+          >
+            <div className="w-16 h-1 rounded-full bg-[var(--text-muted)]/40 group-hover:bg-[var(--accent)] transition-colors" />
+          </div>
+
+          {/* Results Panel */}
+          <div className="flex-1 min-h-0 overflow-auto p-3 bg-[var(--bg-primary)]">
             <ResultsTable result={queryResult} />
           </div>
         </main>
