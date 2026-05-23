@@ -208,6 +208,65 @@ pub fn load_cached_schema(database: &str) -> Result<Option<Schema>, AppError> {
     }))
 }
 
+pub fn load_all_cached_schemas() -> Result<Vec<Schema>, AppError> {
+    let path = get_cache_path();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let conn = Connection::open(path)?;
+
+    // Get all database names
+    let mut db_stmt = conn.prepare("SELECT DISTINCT database FROM schema_cache ORDER BY database")?;
+    let db_names: Vec<String> = db_stmt.query_map([], |row| row.get(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut schemas = Vec::new();
+    for db_name in &db_names {
+        let mut table_map: std::collections::HashMap<String, Vec<ColumnInfo>> = std::collections::HashMap::new();
+
+        let mut stmt = conn.prepare(
+            "SELECT table_name, column_name, column_type, is_nullable, column_key
+             FROM schema_cache WHERE database = ?1 ORDER BY table_name"
+        )?;
+
+        let rows = stmt.query_map([db_name], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get::<_, i32>(3)? != 0,
+                row.get(4)?,
+            ))
+        })?;
+
+        for row in rows {
+            let (table_name, col_name, col_type, is_nullable, col_key): (String, String, String, bool, String) = row?;
+            let columns = table_map.entry(table_name.clone()).or_default();
+            columns.push(ColumnInfo {
+                name: col_name,
+                column_type: col_type,
+                is_nullable,
+                column_key: col_key,
+            });
+        }
+
+        let mut tables: Vec<TableInfo> = table_map
+            .into_iter()
+            .map(|(name, columns)| TableInfo { name, columns })
+            .collect();
+        tables.sort_by(|a, b| a.name.cmp(&b.name));
+
+        schemas.push(Schema {
+            database: db_name.clone(),
+            tables,
+        });
+    }
+
+    Ok(schemas)
+}
+
 #[allow(dead_code)]
 pub fn remove_cached_schema(database: &str) -> Result<(), AppError> {
     let path = get_cache_path();
@@ -237,6 +296,32 @@ pub fn format_schema_for_prompt(schema: &Schema) -> String {
             ));
         }
         result.push('\n');
+    }
+    result
+}
+
+/// Format ALL cached schemas with database.table notation for cross-database queries
+pub fn format_all_schemas_for_prompt(schemas: &[Schema]) -> String {
+    let mut result = String::new();
+    for schema in schemas {
+        result.push_str(&format!("Database: {}\n\n", schema.database));
+        for table in &schema.tables {
+            // Reference tables with database prefix for cross-db JOINs
+            result.push_str(&format!("Table: {}.{}\n", schema.database, table.name));
+            for col in &table.columns {
+                let nullable = if col.is_nullable { "NULL" } else { "NOT NULL" };
+                let key = if !col.column_key.is_empty() {
+                    format!(" [{}]", col.column_key)
+                } else {
+                    String::new()
+                };
+                result.push_str(&format!(
+                    "  - {}.{} {} {}{}\n",
+                    schema.database, col.name, col.column_type, nullable, key
+                ));
+            }
+            result.push('\n');
+        }
     }
     result
 }

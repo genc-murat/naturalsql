@@ -101,15 +101,14 @@ pub async fn remove_cached_schema(database: String) -> Result<(), AppError> {
 
 #[tauri::command]
 pub async fn nl_to_sql(request: NlToSqlRequest) -> Result<SqlResponse, AppError> {
-    if request.database.trim().is_empty() {
-        return Err(AppError::QueryExecution(
-            "Database name is required. Please select a database first.".to_string()
-        ));
+    // Load ALL cached schemas for cross-database query support
+    let all_schemas = schema::load_all_cached_schemas()?;
+    if all_schemas.is_empty() {
+        return Err(AppError::SchemaNotCached);
     }
-    
-    let schema = schema::load_cached_schema(&request.database)?
-        .ok_or(AppError::SchemaNotCached)?;
-    let schema_context = schema::format_schema_for_prompt(&schema);
+
+    // Format all schemas with database.table notation
+    let schema_context = schema::format_all_schemas_for_prompt(&all_schemas);
 
     let sql = llm::natural_language_to_sql(
         &request.natural_language,

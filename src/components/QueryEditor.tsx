@@ -78,10 +78,6 @@ export function QueryEditor({
 
   const handleTranslate = async () => {
     if (!naturalLanguage.trim()) return;
-    if (!selectedDatabase) {
-      setError("Please select a database first");
-      return;
-    }
 
     setIsTranslating(true);
     setError("");
@@ -89,7 +85,7 @@ export function QueryEditor({
     try {
       const response = await nlToSql({
         natural_language: naturalLanguage,
-        database: selectedDatabase,
+        database: selectedDatabase || "",
       });
       setSqlText(response.sql);
     } catch (err) {
@@ -239,9 +235,8 @@ export function QueryEditor({
         />
         <button
           onClick={handleTranslate}
-          disabled={isTranslating || !naturalLanguage.trim() || !selectedDatabase}
+          disabled={isTranslating || !naturalLanguage.trim()}
           className="px-3 py-1.5 rounded-md bg-[var(--accent)]/10 text-[var(--accent)] text-sm font-medium hover:bg-[var(--accent)]/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
-          title={!selectedDatabase ? "Select a database first" : ""}
         >
           {isTranslating ? (
             <Loader2 className="w-3.5 h-3.5 animate-spin" />
