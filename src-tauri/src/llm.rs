@@ -214,7 +214,9 @@ pub async fn natural_language_to_sql_with_tools(
     let tools = define_tools();
     let max_iterations = 10;
 
-    for _ in 0..max_iterations {
+    for iteration in 0..max_iterations {
+        eprintln!("[LLM] Iteration {}/{} — messages count: {}", iteration + 1, max_iterations, messages.len());
+
         let chat_request = json!({
             "model": model,
             "messages": messages,
@@ -229,13 +231,21 @@ pub async fn natural_language_to_sql_with_tools(
             .await?;
 
         if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
             return Err(AppError::QueryExecution(
-                format!("Ollama returned status: {}", response.status())
+                format!("Ollama chat returned {status} — {body}")
             ));
         }
 
         let chat_response: ChatResponse = response.json().await?;
         let assistant_msg = chat_response.message;
+
+        eprintln!("[LLM] Assistant response: role={} tool_calls={} content={:?}",
+            assistant_msg.role,
+            assistant_msg.tool_calls.as_ref().map(|t| t.len()).unwrap_or(0),
+            assistant_msg.content.chars().take(100).collect::<String>()
+        );
 
         // Check if LLM made tool calls
         if let Some(tool_calls) = &assistant_msg.tool_calls {
