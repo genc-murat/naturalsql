@@ -1,64 +1,103 @@
 import { useState, useEffect, useCallback } from "react";
-import { Database, Loader2, Download, ExternalLink, Settings } from "lucide-react";
+import { Database, ExternalLink, Settings } from "lucide-react";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { ConnectionPanel } from "./components/ConnectionPanel";
 import { SchemaBrowser } from "./components/SchemaBrowser";
 import { QueryEditor } from "./components/QueryEditor";
 import { ResultsTable } from "./components/ResultsTable";
 import { LlmConfigPanel } from "./components/LlmConfigPanel";
-import { cacheSchema, getCachedSchema, getLlmConfig } from "./api";
+import {
+  listDatabases,
+  cacheSchema,
+  getCachedSchema,
+  listCachedDatabases,
+  getLlmConfig,
+} from "./api";
 import type { Schema, QueryResult, LlmConfigResponse } from "./types";
 import "./App.css";
 
 function App() {
-  const [isConnected, setIsConnected] = useState(false);
+  const [_isConnected, setIsConnected] = useState(false);
+  const [databases, setDatabases] = useState<string[]>([]);
+  const [cachedDatabases, setCachedDatabases] = useState<string[]>([]);
+  const [selectedDatabase, setSelectedDatabase] = useState<string | null>(null);
   const [schema, setSchema] = useState<Schema | null>(null);
-  const [isCachingSchema, setIsCachingSchema] = useState(false);
+  const [isCaching, setIsCaching] = useState(false);
+  const [cachingDatabase, setCachingDatabase] = useState<string | null>(null);
   const [cacheError, setCacheError] = useState("");
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
   const [connectionString, setConnectionString] = useState("");
   const [showLlmConfig, setShowLlmConfig] = useState(false);
   const [llmConfig, setLlmConfig] = useState<LlmConfigResponse | null>(null);
 
-  // Load cached schema on mount
+  // Load LLM config and cached databases on mount
   useEffect(() => {
-    getCachedSchema().then((res) => {
-      if (res.schema) {
-        setSchema(res.schema);
-      }
-    }).catch(() => {
-      // No cached schema or error loading
-    });
-
-    // Load LLM config
     getLlmConfig().then((cfg) => setLlmConfig(cfg)).catch(() => {});
+    listCachedDatabases().then((dbs) => setCachedDatabases(dbs)).catch(() => {});
   }, []);
 
-  const handleConnected = useCallback(() => {
+  const handleConnected = useCallback(async () => {
     setIsConnected(true);
+    setQueryResult(null);
+    setSchema(null);
+    setSelectedDatabase(null);
+    setCacheError("");
+
+    // Fetch available databases
+    try {
+      const dbs = await listDatabases();
+      setDatabases(dbs);
+    } catch {
+      setDatabases([]);
+    }
   }, []);
 
   const handleDisconnected = useCallback(() => {
     setIsConnected(false);
+    setDatabases([]);
+    setSchema(null);
+    setSelectedDatabase(null);
     setQueryResult(null);
+    setCacheError("");
   }, []);
 
-  const handleCacheSchema = async () => {
-    if (!connectionString) return;
-    
-    setIsCachingSchema(true);
-    setCacheError("");
+  const handleSelectDatabase = useCallback(async (db: string) => {
+    setSelectedDatabase(db);
+
+    // Try to load cached schema
     try {
-      const res = await cacheSchema(connectionString);
+      const res = await getCachedSchema(db);
       if (res.schema) {
         setSchema(res.schema);
+      } else {
+        setSchema(null);
+      }
+    } catch {
+      setSchema(null);
+    }
+  }, []);
+
+  const handleCacheDatabase = useCallback(async (db: string) => {
+    setIsCaching(true);
+    setCachingDatabase(db);
+    setCacheError("");
+
+    try {
+      const res = await cacheSchema(db);
+      if (res.schema) {
+        setSchema(res.schema);
+        setSelectedDatabase(db);
+        // Update cached databases list
+        const cached = await listCachedDatabases();
+        setCachedDatabases(cached);
       }
     } catch (err) {
       setCacheError(err instanceof Error ? err.message : "Failed to cache schema");
     } finally {
-      setIsCachingSchema(false);
+      setIsCaching(false);
+      setCachingDatabase(null);
     }
-  };
+  }, []);
 
   const handleResult = useCallback((result: QueryResult) => {
     setQueryResult(result);
@@ -95,37 +134,27 @@ function App() {
       {/* Main Content */}
       <div className="flex flex-1 overflow-hidden">
         {/* Sidebar - Schema Browser */}
-        <aside className="w-64 border-r border-[var(--border)] bg-[var(--bg-secondary)] flex flex-col">
+        <aside className="w-72 border-r border-[var(--border)] bg-[var(--bg-secondary)] flex flex-col">
           <div className="px-3 py-2 border-b border-[var(--border)]">
             <h2 className="text-sm font-semibold text-[var(--text-secondary)]">
-              Schema Browser
+              Databases
             </h2>
           </div>
           <div className="flex-1 overflow-auto p-2">
-            <SchemaBrowser schema={schema} />
+            <SchemaBrowser
+              schema={schema}
+              databases={databases}
+              cachedDatabases={cachedDatabases}
+              selectedDatabase={selectedDatabase}
+              onSelectDatabase={handleSelectDatabase}
+              onCacheDatabase={handleCacheDatabase}
+              isCaching={isCaching}
+              cachingDatabase={cachingDatabase}
+            />
           </div>
-          {isConnected && !schema && (
-            <div className="p-3 border-t border-[var(--border)] space-y-2">
-              <button
-                onClick={handleCacheSchema}
-                disabled={isCachingSchema || !connectionString}
-                className="w-full px-3 py-2 rounded-lg bg-[var(--accent)] text-white text-sm font-medium hover:bg-[var(--accent-hover)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
-              >
-                {isCachingSchema ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    Caching...
-                  </>
-                ) : (
-                  <>
-                    <Download className="w-4 h-4" />
-                    Cache Schema
-                  </>
-                )}
-              </button>
-              {cacheError && (
-                <p className="text-xs text-[var(--error)] text-center">{cacheError}</p>
-              )}
+          {cacheError && (
+            <div className="p-3 border-t border-[var(--border)]">
+              <p className="text-xs text-[var(--error)] text-center">{cacheError}</p>
             </div>
           )}
         </aside>
@@ -134,7 +163,11 @@ function App() {
         <main className="flex-1 flex flex-col overflow-hidden">
           {/* Query Editor */}
           <div className="p-4 border-b border-[var(--border)] bg-[var(--bg-primary)]">
-            <QueryEditor onResult={handleResult} schema={schema} />
+            <QueryEditor
+              onResult={handleResult}
+              schema={schema}
+              selectedDatabase={selectedDatabase}
+            />
           </div>
 
           {/* Results */}
@@ -160,7 +193,6 @@ function App() {
         isOpen={showLlmConfig}
         onClose={() => {
           setShowLlmConfig(false);
-          // Reload config after closing
           getLlmConfig().then((cfg) => setLlmConfig(cfg)).catch(() => {});
         }}
       />

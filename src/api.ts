@@ -22,12 +22,20 @@ export async function getConnectionStatus(): Promise<ConnectionStatus> {
   return invoke<ConnectionStatus>("get_connection_status");
 }
 
-export async function cacheSchema(connectionString: string): Promise<SchemaResponse> {
-  return invoke<SchemaResponse>("cache_schema", { connectionString });
+export async function listDatabases(): Promise<string[]> {
+  return invoke<string[]>("list_databases");
 }
 
-export async function getCachedSchema(): Promise<SchemaResponse> {
-  return invoke<SchemaResponse>("get_cached_schema");
+export async function cacheSchema(database: string): Promise<SchemaResponse> {
+  return invoke<SchemaResponse>("cache_schema", { database });
+}
+
+export async function getCachedSchema(database: string): Promise<SchemaResponse> {
+  return invoke<SchemaResponse>("get_cached_schema", { database });
+}
+
+export async function listCachedDatabases(): Promise<string[]> {
+  return invoke<string[]>("list_cached_databases");
 }
 
 export async function nlToSql(request: NlToSqlRequest): Promise<SqlResponse> {

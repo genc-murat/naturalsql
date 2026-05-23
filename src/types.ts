@@ -26,7 +26,7 @@ export interface SchemaResponse {
 
 export interface NlToSqlRequest {
   natural_language: string;
-  model?: string;
+  database: string;
 }
 
 export interface SqlResponse {

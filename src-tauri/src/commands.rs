@@ -9,6 +9,7 @@ use crate::query;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NlToSqlRequest {
     pub natural_language: String,
+    pub database: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -62,32 +63,43 @@ pub async fn get_connection_status() -> ConnectionStatus {
 }
 
 #[tauri::command]
-pub async fn cache_schema(connection_string: String) -> Result<SchemaResponse, AppError> {
-    if connection_string.trim().is_empty() {
+pub async fn list_databases() -> Result<Vec<String>, AppError> {
+    connection::list_databases().await
+}
+
+#[tauri::command]
+pub async fn cache_schema(database: String) -> Result<SchemaResponse, AppError> {
+    if database.trim().is_empty() {
         return Err(AppError::QueryExecution(
-            "Connection string is empty. Please connect first.".to_string()
+            "Database name is required.".to_string()
         ));
     }
-    let db_name = connection::get_database_name(&connection_string).await?;
-    if db_name.is_empty() {
-        return Err(AppError::QueryExecution(
-            "Could not parse database name from connection string. Expected format: mysql://user:pass@host:port/database".to_string()
-        ));
-    }
-    let schema = schema::introspect_schema(&db_name).await?;
+    let schema = schema::introspect_schema(&database).await?;
     schema::cache_schema(&schema)?;
     Ok(SchemaResponse { schema: Some(schema) })
 }
 
 #[tauri::command]
-pub async fn get_cached_schema() -> Result<SchemaResponse, AppError> {
-    let cached = schema::load_cached_schema()?;
+pub async fn get_cached_schema(database: String) -> Result<SchemaResponse, AppError> {
+    let cached = schema::load_cached_schema(&database)?;
     Ok(SchemaResponse { schema: cached })
 }
 
 #[tauri::command]
+pub async fn list_cached_databases() -> Result<Vec<String>, AppError> {
+    schema::list_cached_databases()
+}
+
+#[tauri::command]
 pub async fn nl_to_sql(request: NlToSqlRequest) -> Result<SqlResponse, AppError> {
-    let schema = schema::load_cached_schema()?.ok_or(AppError::SchemaNotCached)?;
+    if request.database.trim().is_empty() {
+        return Err(AppError::QueryExecution(
+            "Database name is required. Please select a database first.".to_string()
+        ));
+    }
+    
+    let schema = schema::load_cached_schema(&request.database)?
+        .ok_or(AppError::SchemaNotCached)?;
     let schema_context = schema::format_schema_for_prompt(&schema);
 
     let sql = llm::natural_language_to_sql(

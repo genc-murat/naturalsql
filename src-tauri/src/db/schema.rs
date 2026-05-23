@@ -103,9 +103,11 @@ pub fn cache_schema(schema: &Schema) -> Result<(), AppError> {
             column_type TEXT NOT NULL,
             is_nullable INTEGER NOT NULL,
             column_key TEXT NOT NULL
-        );
-        DELETE FROM schema_cache;"
+        );"
     )?;
+
+    // Delete existing cache for this database only
+    conn.execute("DELETE FROM schema_cache WHERE database = ?1", [&schema.database])?;
 
     let tx = conn.transaction()?;
     {
@@ -132,34 +134,48 @@ pub fn cache_schema(schema: &Schema) -> Result<(), AppError> {
     Ok(())
 }
 
-pub fn load_cached_schema() -> Result<Option<Schema>, AppError> {
+pub fn list_cached_databases() -> Result<Vec<String>, AppError> {
+    let path = get_cache_path();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let conn = Connection::open(path)?;
+    let mut stmt = conn.prepare("SELECT DISTINCT database FROM schema_cache ORDER BY database")?;
+    let databases = stmt.query_map([], |row| row.get(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(databases)
+}
+
+pub fn load_cached_schema(database: &str) -> Result<Option<Schema>, AppError> {
     let path = get_cache_path();
     if !path.exists() {
         return Ok(None);
     }
 
     let conn = Connection::open(path)?;
-    
-    // Get database name
-    let db_name: Option<String> = conn
-        .query_row("SELECT database FROM schema_cache LIMIT 1", [], |row| {
-            row.get(0)
-        })
-        .ok();
 
-    let Some(db_name) = db_name else {
+    // Check if database exists in cache
+    let exists: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM schema_cache WHERE database = ?1",
+        [database],
+        |row| row.get(0),
+    )?;
+
+    if !exists {
         return Ok(None);
-    };
+    }
 
     // Load tables
     let mut table_map: std::collections::HashMap<String, Vec<ColumnInfo>> = std::collections::HashMap::new();
 
     let mut stmt = conn.prepare(
-        "SELECT table_name, column_name, column_type, is_nullable, column_key 
-         FROM schema_cache ORDER BY table_name"
+        "SELECT table_name, column_name, column_type, is_nullable, column_key
+         FROM schema_cache WHERE database = ?1 ORDER BY table_name"
     )?;
 
-    let rows = stmt.query_map([], |row| {
+    let rows = stmt.query_map([database], |row| {
         Ok((
             row.get(0)?,
             row.get(1)?,
@@ -187,9 +203,20 @@ pub fn load_cached_schema() -> Result<Option<Schema>, AppError> {
     tables.sort_by(|a, b| a.name.cmp(&b.name));
 
     Ok(Some(Schema {
-        database: db_name,
+        database: database.to_string(),
         tables,
     }))
+}
+
+pub fn remove_cached_schema(database: &str) -> Result<(), AppError> {
+    let path = get_cache_path();
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let conn = Connection::open(path)?;
+    conn.execute("DELETE FROM schema_cache WHERE database = ?1", [database])?;
+    Ok(())
 }
 
 pub fn format_schema_for_prompt(schema: &Schema) -> String {

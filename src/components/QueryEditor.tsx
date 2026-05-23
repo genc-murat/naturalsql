@@ -9,9 +9,10 @@ import type { QueryResult, Schema } from "../types";
 interface QueryEditorProps {
   onResult: (result: QueryResult) => void;
   schema: Schema | null;
+  selectedDatabase: string | null;
 }
 
-export function QueryEditor({ onResult, schema }: QueryEditorProps) {
+export function QueryEditor({ onResult, schema, selectedDatabase }: QueryEditorProps) {
   const [naturalLanguage, setNaturalLanguage] = useState("");
   const [sqlText, setSqlText] = useState("");
   const [isTranslating, setIsTranslating] = useState(false);
@@ -35,12 +36,19 @@ export function QueryEditor({ onResult, schema }: QueryEditorProps) {
 
   const handleTranslate = async () => {
     if (!naturalLanguage.trim()) return;
+    if (!selectedDatabase) {
+      setError("Please select a database first");
+      return;
+    }
 
     setIsTranslating(true);
     setError("");
 
     try {
-      const response = await nlToSql({ natural_language: naturalLanguage });
+      const response = await nlToSql({
+        natural_language: naturalLanguage,
+        database: selectedDatabase,
+      });
       setSqlText(response.sql);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Translation failed");
@@ -113,8 +121,9 @@ export function QueryEditor({ onResult, schema }: QueryEditorProps) {
           />
           <button
             onClick={handleTranslate}
-            disabled={isTranslating || !naturalLanguage.trim()}
+            disabled={isTranslating || !naturalLanguage.trim() || !selectedDatabase}
             className="px-4 py-2 rounded-lg bg-[var(--accent)] text-white font-medium hover:bg-[var(--accent-hover)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
+            title={!selectedDatabase ? "Select a database first" : ""}
           >
             {isTranslating ? (
               <Loader2 className="w-4 h-4 animate-spin" />

@@ -1,9 +1,16 @@
 import { useState } from "react";
-import { ChevronRight, ChevronDown, Table2, Key, Hash, Type, Calendar } from "lucide-react";
+import { ChevronRight, ChevronDown, Table2, Key, Hash, Type, Calendar, Database, Download, Loader2, CheckCircle } from "lucide-react";
 import type { Schema } from "../types";
 
 interface SchemaBrowserProps {
   schema: Schema | null;
+  databases: string[];
+  cachedDatabases: string[];
+  selectedDatabase: string | null;
+  onSelectDatabase: (db: string) => void;
+  onCacheDatabase: (db: string) => void;
+  isCaching: boolean;
+  cachingDatabase: string | null;
 }
 
 function getColumnIcon(columnType: string) {
@@ -69,23 +76,78 @@ function TableNode({ table }: { table: Schema["tables"][number] }) {
   );
 }
 
-export function SchemaBrowser({ schema }: SchemaBrowserProps) {
-  if (!schema) {
+export function SchemaBrowser({
+  schema,
+  databases,
+  cachedDatabases,
+  selectedDatabase,
+  onSelectDatabase,
+  onCacheDatabase,
+  isCaching,
+  cachingDatabase,
+}: SchemaBrowserProps) {
+  if (databases.length === 0) {
     return (
       <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
-        Connect and cache schema to browse
+        Connect to see databases
       </div>
     );
   }
 
   return (
     <div className="space-y-1">
-      <div className="px-2 py-1.5 text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">
-        {schema.database} ({schema.tables.length} tables)
-      </div>
-      {schema.tables.map((table) => (
-        <TableNode key={table.name} table={table} />
-      ))}
+      {databases.map((db) => {
+        const isCached = cachedDatabases.includes(db);
+        const isSelected = selectedDatabase === db;
+        const isCachingThis = isCaching && cachingDatabase === db;
+
+        return (
+          <div key={db}>
+            {/* Database row */}
+            <div
+              className={`flex items-center gap-1.5 px-2 py-1.5 rounded-md cursor-pointer transition-colors ${
+                isSelected
+                  ? "bg-[var(--accent)]/10 text-[var(--accent)]"
+                  : "hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
+              }`}
+              onClick={() => onSelectDatabase(db)}
+            >
+              <Database className="w-4 h-4 flex-shrink-0" />
+              <span className="text-sm font-medium truncate flex-1">{db}</span>
+              {isCached && !isCachingThis && (
+                <CheckCircle className="w-3.5 h-3.5 text-[var(--success)] flex-shrink-0" />
+              )}
+              {isCachingThis && (
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--accent)] flex-shrink-0" />
+              )}
+              {!isCached && !isCachingThis && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onCacheDatabase(db);
+                  }}
+                  className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] transition-colors"
+                  title={`Cache schema for ${db}`}
+                >
+                  <Download className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+                </button>
+              )}
+            </div>
+
+            {/* Schema tables if selected and cached */}
+            {isSelected && schema && (
+              <div className="ml-4 pl-2 border-l border-[var(--border)]">
+                <div className="px-2 py-1 text-xs text-[var(--text-muted)]">
+                  {schema.tables.length} table{schema.tables.length !== 1 ? "s" : ""}
+                </div>
+                {schema.tables.map((table) => (
+                  <TableNode key={table.name} table={table} />
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
