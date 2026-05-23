@@ -37,11 +37,15 @@ pub async fn execute_query(sql: &str) -> Result<QueryResult, AppError> {
     let pool = get_pool().await?;
     let mut conn = pool.get_conn().await?;
 
-    let rows: Vec<Row> = conn.query(sql).await.map_err(|e| {
-        AppError::QueryExecution(e.to_string())
+    // Use query_map to get rows with column info
+    let result: std::result::Result<Vec<Row>, _> = conn.query(sql).await;
+
+    let rows = result.map_err(|e| {
+        AppError::QueryExecution(format!("{} (SQL: {})", e, sql))
     })?;
 
     if rows.is_empty() {
+        // Non-SELECT statement (INSERT, UPDATE, DELETE) succeeded but returned no rows
         return Ok(QueryResult {
             columns: vec![],
             rows: vec![],
@@ -49,9 +53,9 @@ pub async fn execute_query(sql: &str) -> Result<QueryResult, AppError> {
         });
     }
 
-    // Extract column names from first row
-    let columns: Vec<String> = rows[0]
-        .columns()
+    // Get column definitions from the first row
+    let columns_def = rows[0].columns();
+    let columns: Vec<String> = columns_def
         .as_ref()
         .iter()
         .map(|col| col.name_str().to_string())
@@ -61,11 +65,11 @@ pub async fn execute_query(sql: &str) -> Result<QueryResult, AppError> {
     let mut json_rows = Vec::new();
     for row in rows {
         let mut json_row = Vec::new();
-        for (i, _) in columns.iter().enumerate() {
-            if let Ok(Some(value)) = row.get_opt::<Value, usize>(i).transpose() {
-                json_row.push(mysql_value_to_json(value));
-            } else {
-                json_row.push(JsonValue::Null);
+        for i in 0..columns.len() {
+            let val = row.get_opt::<Value, usize>(i);
+            match val {
+                Some(Ok(v)) => json_row.push(mysql_value_to_json(v)),
+                _ => json_row.push(JsonValue::Null),
             }
         }
         json_rows.push(json_row);
