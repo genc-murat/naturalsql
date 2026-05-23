@@ -15,8 +15,6 @@ interface ResultsTableProps {
   result: QueryResult | null;
 }
 
-const columnHelper = createColumnHelper<any>();
-
 export function ResultsTable({ result }: ResultsTableProps) {
   const [sorting, setSorting] = useState<SortingState>([]);
   const [pageIndex, setPageIndex] = useState(0);
@@ -24,28 +22,38 @@ export function ResultsTable({ result }: ResultsTableProps) {
 
   const columns = useMemo(() => {
     if (!result || result.columns.length === 0) return [];
+    const helper = createColumnHelper<any>();
     return result.columns.map((col) =>
-      columnHelper.accessor(col, {
-        header: col,
-        cell: (info) => {
-          const value = info.getValue();
-          if (value === null || value === undefined) {
-            return <span className="text-[var(--text-muted)] italic">NULL</span>;
-          }
-          return <span>{String(value)}</span>;
-        },
-      })
+      helper.accessor(
+        (row: Record<string, unknown>) => row[col],
+        {
+          id: col,
+          header: col,
+          cell: (info) => {
+            const raw = info.getValue();
+            if (raw === null || raw === undefined) {
+              return <span className="text-[var(--text-muted)] italic">NULL</span>;
+            }
+            return <span>{String(raw)}</span>;
+          },
+        }
+      )
     );
   }, [result]);
 
-  const table = useReactTable({
-    data: result?.rows.map((row, idx) => {
-      const obj: Record<string, any> = { _idx: idx };
+  const data = useMemo(() => {
+    if (!result) return [];
+    return result.rows.map((row) => {
+      const obj: Record<string, unknown> = {};
       result.columns.forEach((col, i) => {
         obj[col] = row[i];
       });
       return obj;
-    }) || [],
+    });
+  }, [result]);
+
+  const table = useReactTable({
+    data,
     columns,
     state: {
       sorting,
@@ -123,15 +131,19 @@ export function ResultsTable({ result }: ResultsTableProps) {
           <tbody>
             {table.getRowModel().rows.map((row) => (
               <tr key={row.id} className="hover:bg-[var(--bg-secondary)] transition-colors">
-                {row.getVisibleCells().map((cell) => (
-                  <td
-                    key={cell.id}
-                    className="px-3 py-2 border-b border-[var(--border)] text-[var(--text-primary)] whitespace-nowrap max-w-[300px] truncate"
-                    title={String(cell.getValue() ?? "")}
-                  >
-                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                  </td>
-                ))}
+                {row.getVisibleCells().map((cell) => {
+                  const raw = row.original[cell.column.id];
+                  const displayValue = raw === null || raw === undefined ? "" : String(raw);
+                  return (
+                    <td
+                      key={cell.id}
+                      className="px-3 py-2 border-b border-[var(--border)] text-[var(--text-primary)] whitespace-nowrap max-w-[300px] truncate"
+                      title={displayValue}
+                    >
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    </td>
+                  );
+                })}
               </tr>
             ))}
           </tbody>
