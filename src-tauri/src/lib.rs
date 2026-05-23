@@ -1,3 +1,4 @@
+mod config;
 mod db;
 mod error;
 mod llm;
@@ -17,6 +18,8 @@ pub fn run() {
             get_cached_schema,
             nl_to_sql,
             execute_sql,
+            get_llm_config,
+            update_llm_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

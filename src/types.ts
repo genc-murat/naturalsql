@@ -42,3 +42,13 @@ export interface QueryResult {
   rows: (string | number | boolean | null)[][];
   row_count: number;
 }
+
+export interface LlmConfigResponse {
+  url: string;
+  model: string;
+}
+
+export interface UpdateLlmConfigRequest {
+  url: string;
+  model: string;
+}

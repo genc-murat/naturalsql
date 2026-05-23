@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback } from "react";
-import { Database, Loader2, Download, ExternalLink } from "lucide-react";
+import { Database, Loader2, Download, ExternalLink, Settings } from "lucide-react";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { ConnectionPanel } from "./components/ConnectionPanel";
 import { SchemaBrowser } from "./components/SchemaBrowser";
 import { QueryEditor } from "./components/QueryEditor";
 import { ResultsTable } from "./components/ResultsTable";
-import { cacheSchema, getCachedSchema } from "./api";
-import type { Schema, QueryResult } from "./types";
+import { LlmConfigPanel } from "./components/LlmConfigPanel";
+import { cacheSchema, getCachedSchema, getLlmConfig } from "./api";
+import type { Schema, QueryResult, LlmConfigResponse } from "./types";
 import "./App.css";
 
 function App() {
@@ -16,6 +17,8 @@ function App() {
   const [cacheError, setCacheError] = useState("");
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
   const [connectionString, setConnectionString] = useState("");
+  const [showLlmConfig, setShowLlmConfig] = useState(false);
+  const [llmConfig, setLlmConfig] = useState<LlmConfigResponse | null>(null);
 
   // Load cached schema on mount
   useEffect(() => {
@@ -26,6 +29,9 @@ function App() {
     }).catch(() => {
       // No cached schema or error loading
     });
+
+    // Load LLM config
+    getLlmConfig().then((cfg) => setLlmConfig(cfg)).catch(() => {});
   }, []);
 
   const handleConnected = useCallback(() => {
@@ -76,6 +82,13 @@ function App() {
             onDisconnected={handleDisconnected}
           />
         </div>
+        <button
+          onClick={() => setShowLlmConfig(true)}
+          className="p-2 rounded-lg transition-colors hover:bg-[var(--bg-tertiary)]"
+          title="LLM Settings"
+        >
+          <Settings className="w-5 h-5 text-[var(--text-secondary)]" />
+        </button>
         <ThemeToggle />
       </header>
 
@@ -138,9 +151,19 @@ function App() {
         </span>
         <span className="flex items-center gap-1">
           <ExternalLink className="w-3 h-3" />
-          gemma4:e2b
+          {llmConfig?.model || "gemma4:e2b"} @ {llmConfig?.url || "localhost:11434"}
         </span>
       </footer>
+
+      {/* LLM Config Modal */}
+      <LlmConfigPanel
+        isOpen={showLlmConfig}
+        onClose={() => {
+          setShowLlmConfig(false);
+          // Reload config after closing
+          getLlmConfig().then((cfg) => setLlmConfig(cfg)).catch(() => {});
+        }}
+      />
     </div>
   );
 }

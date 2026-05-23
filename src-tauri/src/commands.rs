@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::config::{self, AppConfig, LlmConfig};
 use crate::error::AppError;
 use crate::db::{connection, schema};
 use crate::llm;
@@ -8,7 +9,6 @@ use crate::query;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NlToSqlRequest {
     pub natural_language: String,
-    pub model: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -29,6 +29,18 @@ pub struct ConnectionStatus {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SchemaResponse {
     pub schema: Option<schema::Schema>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LlmConfigResponse {
+    pub url: String,
+    pub model: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateLlmConfigRequest {
+    pub url: String,
+    pub model: String,
 }
 
 #[tauri::command]
@@ -77,17 +89,49 @@ pub async fn get_cached_schema() -> Result<SchemaResponse, AppError> {
 pub async fn nl_to_sql(request: NlToSqlRequest) -> Result<SqlResponse, AppError> {
     let schema = schema::load_cached_schema()?.ok_or(AppError::SchemaNotCached)?;
     let schema_context = schema::format_schema_for_prompt(&schema);
-    
+
     let sql = llm::natural_language_to_sql(
         &request.natural_language,
         &schema_context,
-        request.model.as_deref(),
     ).await?;
-    
+
     Ok(SqlResponse { sql })
 }
 
 #[tauri::command]
 pub async fn execute_sql(request: ExecuteRequest) -> Result<query::QueryResult, AppError> {
     query::execute_query(&request.sql).await
+}
+
+#[tauri::command]
+pub async fn get_llm_config() -> Result<LlmConfigResponse, String> {
+    let config = config::get_config().await;
+    Ok(LlmConfigResponse {
+        url: config.llm.url,
+        model: config.llm.model,
+    })
+}
+
+#[tauri::command]
+pub async fn update_llm_config(request: UpdateLlmConfigRequest) -> Result<LlmConfigResponse, String> {
+    if request.url.trim().is_empty() {
+        return Err("URL cannot be empty".to_string());
+    }
+    if request.model.trim().is_empty() {
+        return Err("Model cannot be empty".to_string());
+    }
+
+    let new_config = AppConfig {
+        llm: LlmConfig {
+            url: request.url.clone(),
+            model: request.model.clone(),
+        },
+    };
+
+    config::save_config(&new_config)?;
+
+    Ok(LlmConfigResponse {
+        url: request.url,
+        model: request.model,
+    })
 }

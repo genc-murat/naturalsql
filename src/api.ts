@@ -6,6 +6,8 @@ import type {
   SqlResponse,
   ExecuteRequest,
   QueryResult,
+  LlmConfigResponse,
+  UpdateLlmConfigRequest,
 } from "./types";
 
 export async function connectDb(connectionString: string): Promise<ConnectionStatus> {
@@ -34,4 +36,12 @@ export async function nlToSql(request: NlToSqlRequest): Promise<SqlResponse> {
 
 export async function executeSql(request: ExecuteRequest): Promise<QueryResult> {
   return invoke<QueryResult>("execute_sql", { request });
+}
+
+export async function getLlmConfig(): Promise<LlmConfigResponse> {
+  return invoke<LlmConfigResponse>("get_llm_config");
+}
+
+export async function updateLlmConfig(request: UpdateLlmConfigRequest): Promise<LlmConfigResponse> {
+  return invoke<LlmConfigResponse>("update_llm_config", { request });
 }

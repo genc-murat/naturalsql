@@ -2,6 +2,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
+use crate::config;
 
 #[derive(Debug, Serialize)]
 struct OllamaRequest {
@@ -18,10 +19,10 @@ struct OllamaResponse {
 pub async fn natural_language_to_sql(
     natural_language: &str,
     schema_context: &str,
-    model: Option<&str>,
 ) -> Result<String, AppError> {
-    let model = model.unwrap_or("gemma4:e2b");
-    
+    let url = config::get_llm_url().await;
+    let model = config::get_llm_model().await;
+
     let prompt = format!(
         "You are a MySQL 5.6+ expert. Given the database schema below, convert the user's natural language question into a valid MySQL SQL query.\n\
          Only return the SQL query, no explanations, no markdown formatting, no backticks.\n\n\
@@ -32,14 +33,15 @@ pub async fn natural_language_to_sql(
     );
 
     let request = OllamaRequest {
-        model: model.to_string(),
+        model,
         prompt,
         stream: false,
     };
 
     let client = Client::new();
+    let api_url = format!("{}/api/generate", url.trim_end_matches('/'));
     let response = client
-        .post("http://localhost:11434/api/generate")
+        .post(&api_url)
         .json(&request)
         .send()
         .await?;
@@ -51,7 +53,7 @@ pub async fn natural_language_to_sql(
     }
 
     let ollama_response: OllamaResponse = response.json().await?;
-    
+
     // Clean up the response - remove markdown code blocks if present
     let sql = ollama_response.response.trim().to_string();
     let sql = sql

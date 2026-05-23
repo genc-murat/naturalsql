@@ -1,0 +1,6 @@
+{
+  "llm": {
+    "url": "http://localhost:11434",
+    "model": "gemma4:e2b"
+  }
+}
