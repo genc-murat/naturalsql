@@ -101,18 +101,28 @@ pub async fn remove_cached_schema(database: String) -> Result<(), AppError> {
 
 #[tauri::command]
 pub async fn nl_to_sql(request: NlToSqlRequest) -> Result<SqlResponse, AppError> {
-    // Try tool-based approach first
     let all_schemas = schema::load_all_cached_schemas()?;
     if all_schemas.is_empty() {
         return Err(AppError::SchemaNotCached);
     }
 
-    let sql = llm::natural_language_to_sql_with_tools(
+    // Try tool-based approach first
+    match llm::natural_language_to_sql_with_tools(
         &request.natural_language,
         &all_schemas,
-    ).await?;
-
-    Ok(SqlResponse { sql })
+    ).await {
+        Ok(sql) => Ok(SqlResponse { sql }),
+        Err(e) => {
+            // Fallback to single-prompt approach if tool calling fails
+            eprintln!("Tool calling failed, falling back to single-prompt: {}", e);
+            let schema_context = schema::format_all_schemas_for_prompt(&all_schemas);
+            let sql = llm::natural_language_to_sql(
+                &request.natural_language,
+                &schema_context,
+            ).await?;
+            Ok(SqlResponse { sql })
+        }
+    }
 }
 
 #[tauri::command]

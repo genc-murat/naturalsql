@@ -33,6 +33,7 @@ struct FunctionCall {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ChatResponse {
     message: ChatMessage,
 }
