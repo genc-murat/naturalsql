@@ -17,8 +17,9 @@ import {
   BookOpen,
   Wrench,
   XCircle,
+  Zap,
 } from "lucide-react";
-import { nlToSql, executeSql, explainSql, explainSqlNatural, fixSql } from "../api";
+import { nlToSql, executeSql, explainSql, explainSqlNatural, fixSql, optimizeSql } from "../api";
 import type { QueryResult, Schema } from "../types";
 
 interface QueryEditorProps {
@@ -48,6 +49,8 @@ export function QueryEditor({
   const [isExplaining, setIsExplaining] = useState(false);
   const [sqlFix, setSqlFix] = useState<{ fixed: string; explanation: string } | null>(null);
   const [isFixing, setIsFixing] = useState(false);
+  const [sqlOptimization, setSqlOptimization] = useState<{ suggestions: string; optimized_sql: string | null } | null>(null);
+  const [isOptimizing, setIsOptimizing] = useState(false);
 
   // Track theme changes
   useEffect(() => {
@@ -167,6 +170,26 @@ export function QueryEditor({
       // Keep the original error visible
     } finally {
       setIsFixing(false);
+    }
+  };
+
+  const handleOptimize = async () => {
+    if (!sqlText.trim()) return;
+
+    setIsOptimizing(true);
+    setSqlOptimization(null);
+
+    try {
+      const response = await optimizeSql({ sql: sqlText });
+      setSqlOptimization({ suggestions: response.suggestions, optimized_sql: response.optimized_sql });
+      // If there's an optimized version, replace the editor content
+      if (response.optimized_sql) {
+        setSqlText(response.optimized_sql);
+      }
+    } catch (err) {
+      // Keep any existing content
+    } finally {
+      setIsOptimizing(false);
     }
   };
 
@@ -406,6 +429,19 @@ export function QueryEditor({
             AI Explain
           </button>
           <button
+            onClick={handleOptimize}
+            disabled={isOptimizing || !sqlText.trim()}
+            className="px-3 py-1.5 rounded-md bg-[var(--bg-tertiary)] text-[var(--text-secondary)] text-sm font-medium hover:bg-[var(--border)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+            title="Analyze and optimize query"
+          >
+            {isOptimizing ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Zap className="w-4 h-4" />
+            )}
+            Optimize
+          </button>
+          <button
             onClick={handleExecute}
             disabled={isExecuting || !sqlText.trim()}
             className="px-4 py-1.5 rounded-md bg-[var(--success)] text-white text-sm font-medium hover:bg-green-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
@@ -485,6 +521,32 @@ export function QueryEditor({
           </div>
           <p className="text-sm text-[var(--text-secondary)] leading-relaxed whitespace-pre-wrap">
             {sqlExplanation}
+          </p>
+        </div>
+      )}
+
+      {/* AI Optimization */}
+      {sqlOptimization && (
+        <div className="px-4 py-3 border-t border-[var(--border)] bg-[var(--bg-secondary)] shrink-0">
+          <div className="flex items-start justify-between gap-2 mb-2">
+            <div className="flex items-center gap-2">
+              <Zap className="w-4 h-4 text-yellow-500" />
+              <span className="text-sm font-medium text-yellow-500">Optimization Analysis</span>
+            </div>
+            <button
+              onClick={() => setSqlOptimization(null)}
+              className="p-1 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] transition-colors"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          {sqlOptimization.optimized_sql && (
+            <div className="mb-2 px-3 py-2 rounded-md bg-[var(--bg-primary)] border border-[var(--border)] font-mono text-xs text-[var(--text-primary)] whitespace-pre-wrap">
+              {sqlOptimization.optimized_sql}
+            </div>
+          )}
+          <p className="text-sm text-[var(--text-secondary)] leading-relaxed whitespace-pre-wrap">
+            {sqlOptimization.suggestions}
           </p>
         </div>
       )}

@@ -63,6 +63,10 @@ export async function fixSql(request: { sql: string; error: string }): Promise<{
   return invoke<{ fixed_sql: string; explanation: string }>("fix_sql", { request });
 }
 
+export async function optimizeSql(request: { sql: string }): Promise<{ original_explain: string; suggestions: string; optimized_sql: string | null }> {
+  return invoke<{ original_explain: string; suggestions: string; optimized_sql: string | null }>("optimize_sql", { request });
+}
+
 export async function getLlmConfig(): Promise<LlmConfigResponse> {
   return invoke<LlmConfigResponse>("get_llm_config");
 }

@@ -270,6 +270,110 @@ pub async fn explain_sql_natural(request: ExplainNaturalRequest) -> Result<Expla
     Ok(ExplainNaturalResponse { explanation })
 }
 
+// SQL Optimization via EXPLAIN + LLM analysis
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OptimizeSqlRequest {
+    pub sql: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OptimizeSqlResponse {
+    pub original_explain: String,
+    pub suggestions: String,
+    pub optimized_sql: Option<String>,
+}
+
+#[tauri::command]
+pub async fn optimize_sql(request: OptimizeSqlRequest) -> Result<OptimizeSqlResponse, AppError> {
+    if request.sql.trim().is_empty() {
+        return Err(AppError::InvalidLlmResponse);
+    }
+
+    // Step 1: Run EXPLAIN
+    let explain_result = query::explain_query(&request.sql).await?;
+
+    // Convert explain results to text
+    let mut explain_text = String::new();
+    if !explain_result.columns.is_empty() {
+        explain_text.push_str(&explain_result.columns.join("\t"));
+        explain_text.push('\n');
+        for row in &explain_result.rows {
+            let vals: Vec<String> = row.iter().map(|v| match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => "NULL".to_string(),
+                other => other.to_string(),
+            }).collect();
+            explain_text.push_str(&vals.join("\t"));
+            explain_text.push('\n');
+        }
+    }
+
+    // Step 2: Ask LLM to analyze and suggest
+    let prompt = format!(
+        "You are a MySQL query optimization expert. Analyze the following EXPLAIN output and SQL query.\n\n\
+         Original SQL:\n{}\n\n\
+         EXPLAIN output:\n{}\n\n\
+         Provide:\n\
+         1. A brief analysis of what the EXPLAIN shows (table scans, index usage, etc.)\n\
+         2. Specific optimization suggestions if any\n\
+         3. An optimized version of the query if improvements are possible\n\n\
+         Format your response as:\n\
+         Analysis: <brief analysis>\n\
+         Suggestions: <numbered list of suggestions>\n\
+         Optimized SQL: <the optimized query, or 'No optimization needed' if none>",
+        request.sql, explain_text
+    );
+
+    let url = config::get_llm_url().await;
+    let model = config::get_llm_model().await;
+
+    let response = reqwest::Client::new()
+        .post(&format!("{}/api/generate", url.trim_end_matches('/')))
+        .json(&serde_json::json!({
+            "model": model,
+            "prompt": prompt,
+            "stream": false,
+        }))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(AppError::QueryExecution(
+            format!("Ollama returned status: {}", response.status())
+        ));
+    }
+
+    #[derive(Deserialize)]
+    struct OllamaResp {
+        response: String,
+    }
+
+    let body: OllamaResp = response.json().await?;
+    let text = body.response.trim().to_string();
+
+    // Parse the response - extract optimized SQL if present
+    let mut optimized_sql = None;
+    if let Some(idx) = text.find("Optimized SQL:") {
+        let after = &text[idx + "Optimized SQL:".len()..];
+        let sql = after.trim()
+            .trim_start_matches("```sql")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim()
+            .to_string();
+        if !sql.is_empty() && sql != "No optimization needed" {
+            optimized_sql = Some(sql);
+        }
+    }
+
+    Ok(OptimizeSqlResponse {
+        original_explain: explain_text.trim().to_string(),
+        suggestions: text,
+        optimized_sql,
+    })
+}
+
 #[tauri::command]
 pub async fn get_llm_config() -> Result<LlmConfigResponse, String> {
     let config = config::get_config().await;
