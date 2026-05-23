@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Database, ExternalLink, Settings, CheckCircle } from "lucide-react";
+import { Database, ExternalLink, Settings, CheckCircle, Plug } from "lucide-react";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { ConnectionModal } from "./components/ConnectionModal";
 import { SchemaBrowser } from "./components/SchemaBrowser";
@@ -204,39 +204,49 @@ function App() {
   return (
     <div className="h-screen flex flex-col bg-[var(--bg-primary)]">
       {/* Header */}
-      <header className="flex items-center gap-4 px-4 py-3 border-b border-[var(--border)] bg-[var(--bg-secondary)]">
-        <div className="flex items-center gap-2">
-          <Database className="w-6 h-6 text-[var(--accent)]" />
-          <h1 className="text-lg font-bold text-[var(--text-primary)]">
-            Natural<span className="text-[var(--accent)]">SQL</span>
-          </h1>
-        </div>
-        <div className="flex-1 flex justify-center">
+      <header className="flex items-center justify-between px-4 py-2.5 border-b border-[var(--border)] bg-[var(--bg-secondary)]">
+        {/* Left: Logo + Connection */}
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <Database className="w-5 h-5 text-[var(--accent)]" />
+            <h1 className="text-base font-bold text-[var(--text-primary)]">
+              Natural<span className="text-[var(--accent)]">SQL</span>
+            </h1>
+          </div>
+          <div className="h-5 w-px bg-[var(--border)]" />
           <button
             onClick={() => setShowConnectionModal(true)}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg border transition-colors ${
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm transition-colors ${
               isConnected
-                ? "border-[var(--success)]/30 bg-[var(--success)]/5 hover:bg-[var(--success)]/10"
-                : "border-[var(--border)] bg-[var(--bg-secondary)] hover:bg-[var(--bg-tertiary)]"
+                ? "text-[var(--success)] hover:bg-[var(--success)]/10"
+                : "text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-secondary)]"
             }`}
           >
-            <Database className={`w-4 h-4 ${isConnected ? "text-[var(--success)]" : "text-[var(--text-muted)]"}`} />
-            <span className={`text-sm ${isConnected ? "text-[var(--success)]" : "text-[var(--text-secondary)]"}`}>
-              {isConnected
-                ? parseDatabaseFromUrl(connectionString) || parseDatabaseFromUrl(connectionString)?.split(":")[0] || "Connected"
-                : "Connect to database"}
-            </span>
-            {isConnected && <CheckCircle className="w-3.5 h-3.5 text-[var(--success)]" />}
+            {isConnected ? (
+              <>
+                <CheckCircle className="w-3.5 h-3.5" />
+                <span>{parseDatabaseFromUrl(connectionString) || "Connected"}</span>
+              </>
+            ) : (
+              <>
+                <Plug className="w-3.5 h-3.5" />
+                <span>New Connection</span>
+              </>
+            )}
           </button>
         </div>
-        <button
-          onClick={() => setShowLlmConfig(true)}
-          className="p-2 rounded-lg transition-colors hover:bg-[var(--bg-tertiary)]"
-          title="LLM Settings"
-        >
-          <Settings className="w-5 h-5 text-[var(--text-secondary)]" />
-        </button>
-        <ThemeToggle />
+
+        {/* Right: Actions */}
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => setShowLlmConfig(true)}
+            className="p-2 rounded-md transition-colors hover:bg-[var(--bg-tertiary)]"
+            title="LLM Settings"
+          >
+            <Settings className="w-4 h-4 text-[var(--text-muted)]" />
+          </button>
+          <ThemeToggle />
+        </div>
       </header>
 
       {/* Main Content */}
