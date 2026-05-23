@@ -1,5 +1,6 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use crate::error::AppError;
 use crate::config;
@@ -38,7 +39,10 @@ pub async fn natural_language_to_sql(
         stream: false,
     };
 
-    let client = Client::new();
+    let client = Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()?;
+
     let api_url = format!("{}/api/generate", url.trim_end_matches('/'));
     let response = client
         .post(&api_url)
@@ -47,8 +51,10 @@ pub async fn natural_language_to_sql(
         .await?;
 
     if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
         return Err(AppError::QueryExecution(
-            format!("Ollama returned status: {}", response.status())
+            format!("Ollama returned {} {}: {}", status.as_u16(), status, body)
         ));
     }
 

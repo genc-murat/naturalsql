@@ -17,10 +17,10 @@ pub enum AppError {
     #[error("Not connected to any database")]
     NotConnected,
 
-    #[error("No schema cached. Please cache schema first.")]
+    #[error("No schema cached. Please cache at least one database schema first.")]
     SchemaNotCached,
 
-    #[error("Invalid response from LLM")]
+    #[error("LLM returned an empty response. Try again or check your Ollama model.")]
     InvalidLlmResponse,
 
     #[error("Query execution failed: {0}")]
@@ -35,6 +35,20 @@ impl serde::Serialize for AppError {
     where
         S: serde::Serializer,
     {
+        // For reqwest errors, provide more helpful messages
+        if let AppError::Ollama(e) = self {
+            let msg = if e.is_connect() {
+                "Cannot connect to Ollama. Make sure Ollama is running on the configured URL (default: http://localhost:11434). Run 'ollama serve' to start it."
+            } else if e.is_timeout() {
+                "Ollama request timed out. The model may be loading or the server is unresponsive."
+            } else if e.is_status() {
+                &format!("Ollama returned an HTTP error: {}", e)
+            } else {
+                &format!("Ollama request failed: {}", e)
+            };
+            return serializer.serialize_str(msg);
+        }
+
         serializer.serialize_str(&self.to_string())
     }
 }
