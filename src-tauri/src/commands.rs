@@ -401,15 +401,32 @@ pub async fn build_join(request: BuildJoinRequest) -> Result<BuildJoinResponse, 
 
     // Load all cached schemas for context
     let all_schemas = schema::load_all_cached_schemas()?;
+    
+    // Discover cross-database relationships - try actual FK first, then heuristic
+    let mut cross_db_relations = Vec::new();
+    for s in &all_schemas {
+        if let Ok(rels) = schema::introspect_foreign_keys(&s.database).await {
+            cross_db_relations.extend(rels);
+        }
+    }
+    if cross_db_relations.is_empty() {
+        cross_db_relations = schema::find_cross_database_relationships(&all_schemas);
+    }
+    
+    // Use enhanced schema format with relationship hints for cross-database joins
     let schema_context = if all_schemas.is_empty() {
         "No schema information available. Use standard table names.".to_string()
-    } else {
+    } else if cross_db_relations.is_empty() {
         schema::format_all_schemas_for_prompt(&all_schemas)
+    } else {
+        schema::format_schemas_with_relationships(&all_schemas, &cross_db_relations)
     };
 
     let prompt = format!(
         "You are a MySQL expert. Given the database schema below, generate a SQL JOIN query \
-         based on the user's description. Return ONLY the SQL query, no explanations, no markdown.\n\n\
+         based on the user's description. Return ONLY the SQL query, no explanations, no markdown.\n\
+         Always use fully qualified table names: database.table\n\
+         For cross-database JOINs, ensure both tables are on the same MySQL server.\n\n\
          {}\n\
          User request: {}\n\n\
          SQL:",
@@ -453,6 +470,98 @@ pub async fn build_join(request: BuildJoinRequest) -> Result<BuildJoinResponse, 
     }
 
     Ok(BuildJoinResponse { sql })
+}
+
+// Cross-database JOIN validation - checks if tables exist and suggests join conditions
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ValidateCrossDbJoinRequest {
+    pub left_table: String,
+    pub right_table: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ValidateCrossDbJoinResponse {
+    pub valid: bool,
+    pub left_exists: bool,
+    pub right_exists: bool,
+    pub suggested_join_columns: Vec<(String, String)>,
+    pub has_relationship: bool,
+}
+
+#[tauri::command]
+pub async fn validate_cross_db_join(
+    request: ValidateCrossDbJoinRequest,
+) -> Result<ValidateCrossDbJoinResponse, AppError> {
+    let all_schemas = schema::load_all_cached_schemas()?;
+    
+    // Parse table names (support both "table" and "database.table" formats)
+    let (left_db, left_table) = if request.left_table.contains('.') {
+        let parts: Vec<&str> = request.left_table.splitn(2, '.').collect();
+        (parts[0].to_string(), parts[1].to_string())
+    } else {
+        // If no database specified, find in any schema
+        ("*".to_string(), request.left_table.clone())
+    };
+
+    let (right_db, right_table) = if request.right_table.contains('.') {
+        let parts: Vec<&str> = request.right_table.splitn(2, '.').collect();
+        (parts[0].to_string(), parts[1].to_string())
+    } else {
+        ("*".to_string(), request.right_table.clone())
+    };
+
+    // Find tables in schemas
+    let mut left_exists = false;
+    let mut right_exists = false;
+    let mut left_columns: Vec<schema::ColumnInfo> = Vec::new();
+    let mut right_columns: Vec<schema::ColumnInfo> = Vec::new();
+
+    for schema in &all_schemas {
+        if left_db == "*" || schema.database == left_db {
+            if let Some(table) = schema.tables.iter().find(|t| t.name == left_table) {
+                left_exists = true;
+                left_columns = table.columns.clone();
+            }
+        }
+        if right_db == "*" || schema.database == right_db {
+            if let Some(table) = schema.tables.iter().find(|t| t.name == right_table) {
+                right_exists = true;
+                right_columns = table.columns.clone();
+            }
+        }
+    }
+
+    // Find matching columns for potential join keys
+    let mut suggested_join_columns: Vec<(String, String)> = Vec::new();
+    let left_col_names: std::collections::HashSet<_> = left_columns.iter().map(|c| &c.name).collect();
+    
+    for right_col in &right_columns {
+        if left_col_names.contains(&right_col.name) {
+            // Matching column name - potential join key
+            suggested_join_columns.push((right_col.name.clone(), right_col.name.clone()));
+        }
+    }
+
+    // Check for FK relationships - try actual FK first, then heuristic
+    let mut cross_db_relations = Vec::new();
+    for s in &all_schemas {
+        if let Ok(rels) = schema::introspect_foreign_keys(&s.database).await {
+            cross_db_relations.extend(rels);
+        }
+    }
+    if cross_db_relations.is_empty() {
+        cross_db_relations = schema::find_cross_database_relationships(&all_schemas);
+    }
+    let has_relationship = !cross_db_relations.is_empty();
+
+    Ok(ValidateCrossDbJoinResponse {
+        valid: left_exists && right_exists,
+        left_exists,
+        right_exists,
+        suggested_join_columns,
+        has_relationship,
+    })
 }
 
 // Data Analysis Chat - Natural language data analysis → SQL → Execute → Interpret

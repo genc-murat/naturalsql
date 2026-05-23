@@ -71,6 +71,22 @@ export async function buildJoin(request: { description: string }): Promise<{ sql
   return invoke<{ sql: string }>("build_join", { request });
 }
 
+export async function validateCrossDbJoin(request: { left_table: string; right_table: string }): Promise<{ 
+  valid: boolean; 
+  left_exists: boolean; 
+  right_exists: boolean; 
+  suggested_join_columns: [string, string][];
+  has_relationship: boolean;
+}> {
+  return invoke<{ 
+    valid: boolean; 
+    left_exists: boolean; 
+    right_exists: boolean; 
+    suggested_join_columns: [string, string][];
+    has_relationship: boolean;
+  }>("validate_cross_db_join", { request });
+}
+
 export async function analyzeData(request: { question: string }): Promise<{ sql: string; answer: string; data: { columns: string[]; rows: unknown[][]; row_count: number } | null }> {
   return invoke<{ sql: string; answer: string; data: { columns: string[]; rows: unknown[][]; row_count: number } | null }>("analyze_data", { request });
 }

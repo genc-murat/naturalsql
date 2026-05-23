@@ -5,14 +5,21 @@ import {
   Loader2,
   ArrowRight,
   Send,
+  Database,
 } from "lucide-react";
-import { buildJoin } from "../api";
+import { buildJoin, listCachedDatabases } from "../api";
 
 interface JoinBuilderProps {
   isOpen: boolean;
   onClose: () => void;
   onApply: (sql: string) => void;
   tableNames: string[];
+}
+
+interface TableWithDatabase {
+  database: string;
+  table: string;
+  fullName: string;
 }
 
 const JOIN_TYPES = [
@@ -34,13 +41,81 @@ export function JoinBuilder({ isOpen, onClose, onApply, tableNames }: JoinBuilde
   const [isBuilding, setIsBuilding] = useState(false);
   const [error, setError] = useState("");
   const [mode, setMode] = useState<"manual" | "ai">("manual");
+  const [availableTables, setAvailableTables] = useState<TableWithDatabase[]>([]);
+  const [crossDbMode, setCrossDbMode] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      loadTables();
+    }
+  }, [isOpen, tableNames]);
 
   useEffect(() => {
     if (isOpen && inputRef.current) {
       inputRef.current.focus();
     }
   }, [isOpen]);
+
+  const loadTables = async () => {
+    try {
+      // Try to get databases from cache
+      const databases = await listCachedDatabases();
+      
+      if (databases.length > 1) {
+        // Multiple databases - enable cross-database mode
+        setCrossDbMode(true);
+        const tables: TableWithDatabase[] = [];
+        
+        // For now, use tableNames as-is (should already have database.table format)
+        // In a real implementation, you'd fetch schema for each database
+        for (const db of databases) {
+          for (const table of tableNames) {
+            if (!table.includes('.')) {
+              tables.push({
+                database: db,
+                table,
+                fullName: `${db}.${table}`,
+              });
+            }
+          }
+        }
+        
+        // Also include any tables that already have database prefix
+        for (const table of tableNames) {
+          if (table.includes('.')) {
+            const [db, tbl] = table.split('.');
+            tables.push({
+              database: db,
+              table: tbl,
+              fullName: table,
+            });
+          }
+        }
+        
+        setAvailableTables(tables);
+      } else {
+        // Single database mode
+        setCrossDbMode(false);
+        const tables: TableWithDatabase[] = tableNames.map(t => {
+          if (t.includes('.')) {
+            const [db, tbl] = t.split('.');
+            return { database: db, table: tbl, fullName: t };
+          }
+          return { database: databases[0] || 'unknown', table: t, fullName: t };
+        });
+        setAvailableTables(tables);
+      }
+    } catch (err) {
+      console.error('Failed to load tables:', err);
+      // Fallback to tableNames as-is
+      setAvailableTables(tableNames.map(t => ({
+        database: '',
+        table: t,
+        fullName: t,
+      })));
+    }
+  };
 
   const generateManualSql = () => {
     if (!leftTable || !rightTable) {
@@ -100,7 +175,7 @@ export function JoinBuilder({ isOpen, onClose, onApply, tableNames }: JoinBuilde
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
       <div
-        className="w-full max-w-lg rounded-xl bg-[var(--bg-primary)] border border-[var(--border)] shadow-2xl overflow-hidden"
+        className="w-full max-w-2xl rounded-xl bg-[var(--bg-primary)] border border-[var(--border)] shadow-2xl overflow-hidden"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
       >
@@ -109,6 +184,12 @@ export function JoinBuilder({ isOpen, onClose, onApply, tableNames }: JoinBuilde
           <div className="flex items-center gap-2">
             <GitBranch className="w-5 h-5 text-[var(--accent)]" />
             <h2 className="text-base font-semibold text-[var(--text-primary)]">Join Builder</h2>
+            {crossDbMode && (
+              <span className="px-2 py-0.5 rounded-md bg-[var(--accent)]/10 text-[var(--accent)] text-xs font-medium flex items-center gap-1">
+                <Database className="w-3 h-3" />
+                Cross-DB
+              </span>
+            )}
           </div>
           <button onClick={onClose} className="p-1.5 rounded-md hover:bg-[var(--bg-tertiary)] transition-colors">
             <X className="w-4 h-4 text-[var(--text-muted)]" />
@@ -164,9 +245,11 @@ export function JoinBuilder({ isOpen, onClose, onApply, tableNames }: JoinBuilde
                 </div>
               </div>
 
-              {/* Tables */}
+              {/* Tables - Enhanced for cross-database */}
               <div className="space-y-1.5">
-                <label className="text-xs font-medium text-[var(--text-muted)]">Tables</label>
+                <label className="text-xs font-medium text-[var(--text-muted)]">
+                  Tables {crossDbMode && "(database.table format supported)"}
+                </label>
                 <div className="flex items-center gap-2">
                   <select
                     value={leftTable}
@@ -174,8 +257,8 @@ export function JoinBuilder({ isOpen, onClose, onApply, tableNames }: JoinBuilde
                     className="flex-1 px-3 py-2 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border)] text-[var(--text-primary)] text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
                   >
                     <option value="">Left table...</option>
-                    {tableNames.map((t) => (
-                      <option key={t} value={t}>{t}</option>
+                    {availableTables.map((t) => (
+                      <option key={`left-${t.fullName}`} value={t.fullName}>{t.fullName}</option>
                     ))}
                   </select>
                   <ArrowRight className="w-4 h-4 text-[var(--text-muted)] flex-shrink-0" />
@@ -185,11 +268,16 @@ export function JoinBuilder({ isOpen, onClose, onApply, tableNames }: JoinBuilde
                     className="flex-1 px-3 py-2 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border)] text-[var(--text-primary)] text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
                   >
                     <option value="">Right table...</option>
-                    {tableNames.map((t) => (
-                      <option key={t} value={t}>{t}</option>
+                    {availableTables.map((t) => (
+                      <option key={`right-${t.fullName}`} value={t.fullName}>{t.fullName}</option>
                     ))}
                   </select>
                 </div>
+                {crossDbMode && (
+                  <p className="text-xs text-[var(--text-muted)] mt-1">
+                    Tip: You can join tables across different databases using fully qualified names
+                  </p>
+                )}
               </div>
 
               {/* Join Columns */}
@@ -249,20 +337,29 @@ export function JoinBuilder({ isOpen, onClose, onApply, tableNames }: JoinBuilde
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleAiBuild()}
-                  placeholder="e.g., join users with their orders, include only active users"
+                  placeholder={crossDbMode 
+                    ? "e.g., join db1.users with db2.orders, include only active users"
+                    : "e.g., join users with their orders, include only active users"
+                  }
                   className="w-full px-3 py-2 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border)] text-[var(--text-primary)] placeholder-[var(--text-muted)] text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
                 />
               </div>
-              {tableNames.length > 0 && (
+              {availableTables.length > 0 && (
                 <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-[var(--text-muted)]">Available tables</label>
-                  <div className="flex flex-wrap gap-1">
-                    {tableNames.map((t) => (
+                  <label className="text-xs font-medium text-[var(--text-muted)]">
+                    Available tables {crossDbMode && "(across databases)"}
+                  </label>
+                  <div className="flex flex-wrap gap-1 max-h-24 overflow-y-auto">
+                    {availableTables.map((t) => (
                       <span
-                        key={t}
-                        className="px-2 py-0.5 rounded-md bg-[var(--bg-secondary)] border border-[var(--border)] text-xs text-[var(--text-secondary)]"
+                        key={t.fullName}
+                        className={`px-2 py-0.5 rounded-md border text-xs ${
+                          t.fullName.includes('.')
+                            ? "bg-[var(--accent)]/5 border-[var(--accent)]/30 text-[var(--accent)]"
+                            : "bg-[var(--bg-secondary)] border-[var(--border)] text-[var(--text-secondary)]"
+                        }`}
                       >
-                        {t}
+                        {t.fullName}
                       </span>
                     ))}
                   </div>
