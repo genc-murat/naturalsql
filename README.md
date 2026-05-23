@@ -91,7 +91,7 @@ npm run tauri build
 
 ## Configuration
 
-The default Ollama model is `gemma3:1b`. You can change this by modifying the `model` parameter in the `nl_to_sql` command.
+The default Ollama model is `gemma4:e2b`. You can change this by modifying the `model` parameter in the `nl_to_sql` command.
 
 ## License
 
