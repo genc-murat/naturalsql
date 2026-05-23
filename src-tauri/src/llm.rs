@@ -151,13 +151,14 @@ pub async fn natural_language_to_sql_with_tools(
             if let Some(tool_name) = tool_call.get("tool").and_then(|v| v.as_str()) {
                 let call_sig = tool_call.to_string();
                 if seen_tool_calls.contains(&call_sig) {
-                    // Repeated call → fallback immediately with accumulated conversation
-                    eprintln!("[LLM] Repeated tool call, using conversation context for fallback");
+                    // Repeated call → fallback with ALL schemas for complete context
+                    eprintln!("[LLM] Repeated tool call, falling back with all schemas");
+                    let schema_context = schema::format_all_schemas_for_prompt(all_schemas);
                     let fallback_prompt = format!(
-                        "You are a MySQL 5.6+ expert. Based on the schema information gathered below, \
+                        "You are a MySQL 5.6+ expert. Given the database schema below, \
                          write a SQL query to answer the user's question.\n\
                          Only return the SQL query, no explanations, no markdown.\n\n\
-                         {conversation}\n\n\
+                         {schema_context}\n\n\
                          User's question: {natural_language}\n\n\
                          SQL Query:",
                     );
@@ -175,12 +176,13 @@ pub async fn natural_language_to_sql_with_tools(
                 if let Some(tool_name) = tool_call.get("tool").and_then(|v| v.as_str()) {
                     let call_sig = tool_call.to_string();
                     if seen_tool_calls.contains(&call_sig) {
-                        eprintln!("[LLM] Repeated tool call (extracted), using conversation context for fallback");
+                        eprintln!("[LLM] Repeated tool call (extracted), falling back with all schemas");
+                        let schema_context = schema::format_all_schemas_for_prompt(all_schemas);
                         let fallback_prompt = format!(
-                            "You are a MySQL 5.6+ expert. Based on the schema information gathered below, \
+                            "You are a MySQL 5.6+ expert. Given the database schema below, \
                              write a SQL query to answer the user's question.\n\
                              Only return the SQL query, no explanations, no markdown.\n\n\
-                             {conversation}\n\n\
+                             {schema_context}\n\n\
                              User's question: {natural_language}\n\n\
                              SQL Query:",
                         );
@@ -205,13 +207,14 @@ pub async fn natural_language_to_sql_with_tools(
             return Ok(sql);
         }
 
-        // No valid SQL — fallback with conversation context
-        eprintln!("[LLM] No valid SQL from tool iteration, using conversation context for fallback");
+        // No valid SQL — fallback with ALL schemas
+        eprintln!("[LLM] No valid SQL from tool iteration, falling back with all schemas");
+        let schema_context = schema::format_all_schemas_for_prompt(all_schemas);
         let fallback_prompt = format!(
-            "You are a MySQL 5.6+ expert. Based on the schema information gathered below, \
+            "You are a MySQL 5.6+ expert. Given the database schema below, \
              write a SQL query to answer the user's question.\n\
              Only return the SQL query, no explanations, no markdown.\n\n\
-             {conversation}\n\n\
+             {schema_context}\n\n\
              User's question: {natural_language}\n\n\
              SQL Query:",
         );
