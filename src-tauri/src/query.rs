@@ -5,7 +5,7 @@ use std::time::Instant;
 use crate::error::AppError;
 use crate::db::connection::get_pool;
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct QueryResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<JsonValue>>,

@@ -448,6 +448,138 @@ pub async fn build_join(request: BuildJoinRequest) -> Result<BuildJoinResponse, 
     Ok(BuildJoinResponse { sql })
 }
 
+// Data Analysis Chat - Natural language data analysis → SQL → Execute → Interpret
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AnalyzeDataRequest {
+    pub question: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AnalyzeDataResponse {
+    pub sql: String,
+    pub answer: String,
+    pub data: Option<query::QueryResult>,
+}
+
+#[tauri::command]
+pub async fn analyze_data(request: AnalyzeDataRequest) -> Result<AnalyzeDataResponse, AppError> {
+    if request.question.trim().is_empty() {
+        return Err(AppError::InvalidLlmResponse);
+    }
+
+    // Load all cached schemas for context
+    let all_schemas = schema::load_all_cached_schemas()?;
+    let schema_context = if all_schemas.is_empty() {
+        "No schema information available.".to_string()
+    } else {
+        schema::format_all_schemas_for_prompt(&all_schemas)
+    };
+
+    // Step 1: Generate SQL
+    let sql_prompt = format!(
+        "You are a MySQL data analyst. Given the database schema below, write a SQL query to answer the user's question.\n\
+         Return ONLY the SQL query, no explanations, no markdown.\n\n\
+         {}\n\
+         Question: {}\n\n\
+         SQL:",
+        schema_context, request.question
+    );
+
+    let url = config::get_llm_url().await;
+    let model = config::get_llm_model().await;
+
+    let response = reqwest::Client::new()
+        .post(&format!("{}/api/generate", url.trim_end_matches('/')))
+        .json(&serde_json::json!({
+            "model": model,
+            "prompt": sql_prompt,
+            "stream": false,
+        }))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(AppError::QueryExecution(
+            format!("Ollama returned status: {}", response.status())
+        ));
+    }
+
+    #[derive(Deserialize)]
+    struct OllamaResp { response: String }
+
+    let body: OllamaResp = response.json().await?;
+    let sql = body.response.trim()
+        .trim_start_matches("```sql")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim()
+        .to_string();
+
+    if sql.is_empty() {
+        return Err(AppError::InvalidLlmResponse);
+    }
+
+    // Step 2: Execute the query
+    let data = query::execute_query(&sql).await.ok();
+
+    // Step 3: Ask LLM to interpret the results
+    let data_summary = if let Some(ref d) = data {
+        let mut summary = format!("Query returned {} rows.\n\n", d.row_count);
+        summary.push_str(&format!("Columns: {}\n\n", d.columns.join(", ")));
+        // Include first 5 rows as sample
+        for (i, row) in d.rows.iter().enumerate().take(5) {
+            let vals: Vec<String> = row.iter().map(|v| match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => "NULL".to_string(),
+                other => other.to_string(),
+            }).collect();
+            summary.push_str(&format!("Row {}: {}\n", i + 1, vals.join(", ")));
+        }
+        if d.row_count > 5 {
+            summary.push_str(&format!("\n... and {} more rows\n", d.row_count - 5));
+        }
+        summary
+    } else {
+        "Query executed successfully but returned no data.".to_string()
+    };
+
+    let interpret_prompt = format!(
+        "You are a data analyst. Given the user's question, the SQL query, and the query results,\n\
+         provide a clear, concise answer to the user's question. Include key insights from the data.\n\n\
+         Question: {}\n\n\
+         SQL: {}\n\n\
+         Results:\n{}\n\n\
+         Answer:",
+        request.question, sql, data_summary
+    );
+
+    let interp_response = reqwest::Client::new()
+        .post(&format!("{}/api/generate", url.trim_end_matches('/')))
+        .json(&serde_json::json!({
+            "model": model,
+            "prompt": interpret_prompt,
+            "stream": false,
+        }))
+        .send()
+        .await?;
+
+    let answer = if interp_response.status().is_success() {
+        match interp_response.json::<OllamaResp>().await {
+            Ok(b) => b.response.trim().to_string(),
+            Err(_) => "Query executed successfully.".to_string(),
+        }
+    } else {
+        "Query executed successfully.".to_string()
+    };
+
+    Ok(AnalyzeDataResponse {
+        sql,
+        answer,
+        data,
+    })
+}
+
 #[tauri::command]
 pub async fn get_llm_config() -> Result<LlmConfigResponse, String> {
     let config = config::get_config().await;

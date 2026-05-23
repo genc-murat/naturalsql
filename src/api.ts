@@ -71,6 +71,10 @@ export async function buildJoin(request: { description: string }): Promise<{ sql
   return invoke<{ sql: string }>("build_join", { request });
 }
 
+export async function analyzeData(request: { question: string }): Promise<{ sql: string; answer: string; data: { columns: string[]; rows: unknown[][]; row_count: number } | null }> {
+  return invoke<{ sql: string; answer: string; data: { columns: string[]; rows: unknown[][]; row_count: number } | null }>("analyze_data", { request });
+}
+
 export async function getLlmConfig(): Promise<LlmConfigResponse> {
   return invoke<LlmConfigResponse>("get_llm_config");
 }

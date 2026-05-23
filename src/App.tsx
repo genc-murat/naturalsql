@@ -5,6 +5,7 @@ import { ConnectionModal } from "./components/ConnectionModal";
 import { SchemaBrowser } from "./components/SchemaBrowser";
 import { QueryEditor } from "./components/QueryEditor";
 import { ResultsTable } from "./components/ResultsTable";
+import { AnalysisChat } from "./components/AnalysisChat";
 import { LlmConfigPanel } from "./components/LlmConfigPanel";
 import {
   listDatabases,
@@ -29,6 +30,7 @@ function App() {
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
   const [connectionString, setConnectionString] = useState("");
   const [showLlmConfig, setShowLlmConfig] = useState(false);
+  const [showAnalysisChat, setShowAnalysisChat] = useState(false);
   const [showConnectionModal, setShowConnectionModal] = useState(false);
   const [llmConfig, setLlmConfig] = useState<LlmConfigResponse | null>(null);
   const [isConnected, setIsConnected] = useState(false);
@@ -249,6 +251,10 @@ function App() {
 
         {/* Right: Actions */}
         <div className="flex items-center gap-1">
+          <AnalysisChat
+            isOpen={showAnalysisChat}
+            onToggle={() => setShowAnalysisChat(!showAnalysisChat)}
+          />
           <button
             onClick={() => setShowLlmConfig(true)}
             className="p-2 rounded-md transition-colors hover:bg-[var(--bg-tertiary)]"
@@ -261,7 +267,7 @@ function App() {
       </header>
 
       {/* Main Content */}
-      <div ref={mainAreaRef} className="flex flex-1 overflow-hidden">
+      <div ref={mainAreaRef} className={`flex flex-1 overflow-hidden transition-all duration-300 ${showAnalysisChat ? "mr-96" : ""}`}>
         {/* Sidebar - Schema Browser */}
         <aside
           className="border-r border-[var(--border)] bg-[var(--bg-secondary)] flex flex-col shrink-0"
