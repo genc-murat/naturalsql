@@ -20,7 +20,7 @@ pub async fn natural_language_to_sql(
     schema_context: &str,
     model: Option<&str>,
 ) -> Result<String, AppError> {
-    let model = model.unwrap_or("gemma3:1b");
+    let model = model.unwrap_or("gemma4:e2b");
     
     let prompt = format!(
         "You are a MySQL 5.6+ expert. Given the database schema below, convert the user's natural language question into a valid MySQL SQL query.\n\

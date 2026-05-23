@@ -3,12 +3,18 @@ import { Database, Loader2, CheckCircle, XCircle } from "lucide-react";
 import { connectDb, disconnectDb } from "../api";
 
 interface ConnectionPanelProps {
+  connectionString: string;
+  onConnectionStringChange: (value: string) => void;
   onConnected: () => void;
   onDisconnected: () => void;
 }
 
-export function ConnectionPanel({ onConnected, onDisconnected }: ConnectionPanelProps) {
-  const [connectionString, setConnectionString] = useState("");
+export function ConnectionPanel({
+  connectionString,
+  onConnectionStringChange,
+  onConnected,
+  onDisconnected,
+}: ConnectionPanelProps) {
   const [isConnecting, setIsConnecting] = useState(false);
   const [status, setStatus] = useState<"idle" | "success" | "error">("idle");
   const [errorMessage, setErrorMessage] = useState("");
@@ -50,7 +56,7 @@ export function ConnectionPanel({ onConnected, onDisconnected }: ConnectionPanel
         <input
           type="text"
           value={connectionString}
-          onChange={(e) => setConnectionString(e.target.value)}
+          onChange={(e) => onConnectionStringChange(e.target.value)}
           placeholder="mysql://user:password@localhost:3306/database"
           className="flex-1 px-3 py-2 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border)] text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
         />

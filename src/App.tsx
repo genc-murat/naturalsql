@@ -13,8 +13,9 @@ function App() {
   const [isConnected, setIsConnected] = useState(false);
   const [schema, setSchema] = useState<Schema | null>(null);
   const [isCachingSchema, setIsCachingSchema] = useState(false);
+  const [cacheError, setCacheError] = useState("");
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
-  const [connectionString, _setConnectionString] = useState("");
+  const [connectionString, setConnectionString] = useState("");
 
   // Load cached schema on mount
   useEffect(() => {
@@ -40,13 +41,14 @@ function App() {
     if (!connectionString) return;
     
     setIsCachingSchema(true);
+    setCacheError("");
     try {
       const res = await cacheSchema(connectionString);
       if (res.schema) {
         setSchema(res.schema);
       }
     } catch (err) {
-      console.error("Failed to cache schema:", err);
+      setCacheError(err instanceof Error ? err.message : "Failed to cache schema");
     } finally {
       setIsCachingSchema(false);
     }
@@ -68,6 +70,8 @@ function App() {
         </div>
         <div className="flex-1">
           <ConnectionPanel
+            connectionString={connectionString}
+            onConnectionStringChange={setConnectionString}
             onConnected={handleConnected}
             onDisconnected={handleDisconnected}
           />
@@ -88,7 +92,7 @@ function App() {
             <SchemaBrowser schema={schema} />
           </div>
           {isConnected && !schema && (
-            <div className="p-3 border-t border-[var(--border)]">
+            <div className="p-3 border-t border-[var(--border)] space-y-2">
               <button
                 onClick={handleCacheSchema}
                 disabled={isCachingSchema || !connectionString}
@@ -106,6 +110,9 @@ function App() {
                   </>
                 )}
               </button>
+              {cacheError && (
+                <p className="text-xs text-[var(--error)] text-center">{cacheError}</p>
+              )}
             </div>
           )}
         </aside>
@@ -131,7 +138,7 @@ function App() {
         </span>
         <span className="flex items-center gap-1">
           <ExternalLink className="w-3 h-3" />
-          gemma3:1b
+          gemma4:e2b
         </span>
       </footer>
     </div>

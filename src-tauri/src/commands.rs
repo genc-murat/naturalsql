@@ -51,7 +51,17 @@ pub async fn get_connection_status() -> ConnectionStatus {
 
 #[tauri::command]
 pub async fn cache_schema(connection_string: String) -> Result<SchemaResponse, AppError> {
+    if connection_string.trim().is_empty() {
+        return Err(AppError::QueryExecution(
+            "Connection string is empty. Please connect first.".to_string()
+        ));
+    }
     let db_name = connection::get_database_name(&connection_string).await?;
+    if db_name.is_empty() {
+        return Err(AppError::QueryExecution(
+            "Could not parse database name from connection string. Expected format: mysql://user:pass@host:port/database".to_string()
+        ));
+    }
     let schema = schema::introspect_schema(&db_name).await?;
     schema::cache_schema(&schema)?;
     Ok(SchemaResponse { schema: Some(schema) })
