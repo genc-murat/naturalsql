@@ -205,8 +205,8 @@ function App() {
 
         {/* Main Area */}
         <main className="flex-1 flex flex-col overflow-hidden">
-          {/* Query Editor */}
-          <div className="p-4 border-b border-[var(--border)] bg-[var(--bg-primary)]">
+          {/* Query Editor - gives ~45% of the height */}
+          <div className="flex-[0_0_45%] min-h-[200px] border-b border-[var(--border)] bg-[var(--bg-primary)] flex flex-col">
             <QueryEditor
               onResult={handleResult}
               schema={schema}
@@ -214,8 +214,8 @@ function App() {
             />
           </div>
 
-          {/* Results */}
-          <div className="flex-1 overflow-auto p-4 bg-[var(--bg-primary)]">
+          {/* Results - takes remaining space */}
+          <div className="flex-1 overflow-auto p-3 bg-[var(--bg-primary)]">
             <ResultsTable result={queryResult} />
           </div>
         </main>
