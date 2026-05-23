@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Database, ExternalLink, Settings } from "lucide-react";
+import { Database, ExternalLink, Settings, CheckCircle } from "lucide-react";
 import { ThemeToggle } from "./components/ThemeToggle";
-import { ConnectionPanel } from "./components/ConnectionPanel";
+import { ConnectionModal } from "./components/ConnectionModal";
 import { SchemaBrowser } from "./components/SchemaBrowser";
 import { QueryEditor } from "./components/QueryEditor";
 import { ResultsTable } from "./components/ResultsTable";
@@ -18,7 +18,6 @@ import type { Schema, QueryResult, LlmConfigResponse } from "./types";
 import "./App.css";
 
 function App() {
-  const [_isConnected, setIsConnected] = useState(false);
   const [databases, setDatabases] = useState<string[]>([]);
   const [cachedDatabases, setCachedDatabases] = useState<string[]>([]);
   const [selectedDatabase, setSelectedDatabase] = useState<string | null>(null);
@@ -29,7 +28,9 @@ function App() {
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
   const [connectionString, setConnectionString] = useState("");
   const [showLlmConfig, setShowLlmConfig] = useState(false);
+  const [showConnectionModal, setShowConnectionModal] = useState(false);
   const [llmConfig, setLlmConfig] = useState<LlmConfigResponse | null>(null);
+  const [isConnected, setIsConnected] = useState(false);
   const [editorHeight, setEditorHeight] = useState(280);
   const [sidebarWidth, setSidebarWidth] = useState(288); // w-72 = 288px
   const [isDragging, setIsDragging] = useState(false);
@@ -210,13 +211,23 @@ function App() {
             Natural<span className="text-[var(--accent)]">SQL</span>
           </h1>
         </div>
-        <div className="flex-1">
-          <ConnectionPanel
-            connectionString={connectionString}
-            onConnectionStringChange={setConnectionString}
-            onConnected={handleConnected}
-            onDisconnected={handleDisconnected}
-          />
+        <div className="flex-1 flex justify-center">
+          <button
+            onClick={() => setShowConnectionModal(true)}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg border transition-colors ${
+              isConnected
+                ? "border-[var(--success)]/30 bg-[var(--success)]/5 hover:bg-[var(--success)]/10"
+                : "border-[var(--border)] bg-[var(--bg-secondary)] hover:bg-[var(--bg-tertiary)]"
+            }`}
+          >
+            <Database className={`w-4 h-4 ${isConnected ? "text-[var(--success)]" : "text-[var(--text-muted)]"}`} />
+            <span className={`text-sm ${isConnected ? "text-[var(--success)]" : "text-[var(--text-secondary)]"}`}>
+              {isConnected
+                ? parseDatabaseFromUrl(connectionString) || parseDatabaseFromUrl(connectionString)?.split(":")[0] || "Connected"
+                : "Connect to database"}
+            </span>
+            {isConnected && <CheckCircle className="w-3.5 h-3.5 text-[var(--success)]" />}
+          </button>
         </div>
         <button
           onClick={() => setShowLlmConfig(true)}
@@ -312,6 +323,17 @@ function App() {
           setShowLlmConfig(false);
           getLlmConfig().then((cfg) => setLlmConfig(cfg)).catch(() => {});
         }}
+      />
+
+      {/* Connection Modal */}
+      <ConnectionModal
+        isOpen={showConnectionModal}
+        onClose={() => setShowConnectionModal(false)}
+        connectionString={connectionString}
+        onConnectionStringChange={setConnectionString}
+        onConnected={handleConnected}
+        onDisconnected={handleDisconnected}
+        isConnected={isConnected}
       />
     </div>
   );
