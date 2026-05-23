@@ -8,6 +8,7 @@ import type {
   QueryResult,
   LlmConfigResponse,
   UpdateLlmConfigRequest,
+  ConnectionProfileResponse,
 } from "./types";
 
 export async function connectDb(connectionString: string): Promise<ConnectionStatus> {
@@ -60,4 +61,16 @@ export async function getLlmConfig(): Promise<LlmConfigResponse> {
 
 export async function updateLlmConfig(request: UpdateLlmConfigRequest): Promise<LlmConfigResponse> {
   return invoke<LlmConfigResponse>("update_llm_config", { request });
+}
+
+export async function listConnections(): Promise<ConnectionProfileResponse[]> {
+  return invoke<ConnectionProfileResponse[]>("list_connections");
+}
+
+export async function saveConnectionProfile(profile: ConnectionProfileResponse): Promise<void> {
+  return invoke("save_connection_profile", { profile });
+}
+
+export async function deleteConnectionProfile(name: string): Promise<void> {
+  return invoke("delete_connection_profile", { name });
 }

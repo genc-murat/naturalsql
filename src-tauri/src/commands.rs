@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::config::{self, AppConfig, LlmConfig};
+use crate::config::{self, ConnectionProfile, LlmConfig};
 use crate::error::AppError;
 use crate::db::{connection, schema};
 use crate::llm;
@@ -146,17 +146,74 @@ pub async fn update_llm_config(request: UpdateLlmConfigRequest) -> Result<LlmCon
         return Err("Model cannot be empty".to_string());
     }
 
-    let new_config = AppConfig {
-        llm: LlmConfig {
-            url: request.url.clone(),
-            model: request.model.clone(),
-        },
+    let mut config = config::get_config().await;
+    config.llm = LlmConfig {
+        url: request.url.clone(),
+        model: request.model.clone(),
     };
 
-    config::save_config(&new_config)?;
+    config::save_config(&config)?;
 
     Ok(LlmConfigResponse {
         url: request.url,
         model: request.model,
     })
+}
+
+// Connection Profile Commands
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ConnectionProfileResponse {
+    pub name: String,
+    pub host: String,
+    pub port: String,
+    pub user: String,
+    pub password: String,
+    pub database: String,
+}
+
+impl From<&ConnectionProfile> for ConnectionProfileResponse {
+    fn from(p: &ConnectionProfile) -> Self {
+        Self {
+            name: p.name.clone(),
+            host: p.host.clone(),
+            port: p.port.clone(),
+            user: p.user.clone(),
+            password: p.password.clone(),
+            database: p.database.clone(),
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn list_connections() -> Vec<ConnectionProfileResponse> {
+    let profiles = config::get_connections().await;
+    profiles.iter().map(|p| p.into()).collect()
+}
+
+#[tauri::command]
+pub async fn save_connection_profile(profile: ConnectionProfileResponse) -> Result<(), String> {
+    if profile.name.trim().is_empty() {
+        return Err("Profile name cannot be empty".to_string());
+    }
+    if profile.host.trim().is_empty() {
+        return Err("Host cannot be empty".to_string());
+    }
+
+    config::save_connection(ConnectionProfile {
+        name: profile.name,
+        host: profile.host,
+        port: profile.port,
+        user: profile.user,
+        password: profile.password,
+        database: profile.database,
+    }).await
+}
+
+#[tauri::command]
+pub async fn delete_connection_profile(name: String) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("Profile name cannot be empty".to_string());
+    }
+    config::delete_connection(name).await
 }

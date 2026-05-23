@@ -11,8 +11,18 @@ import {
   Lock,
   Hash,
   Package,
+  Bookmark,
+  Trash2,
+  Save,
 } from "lucide-react";
-import { connectDb, disconnectDb } from "../api";
+import {
+  connectDb,
+  disconnectDb,
+  listConnections,
+  saveConnectionProfile,
+  deleteConnectionProfile,
+} from "../api";
+import type { ConnectionProfileResponse } from "../types";
 
 interface ConnectionModalProps {
   isOpen: boolean;
@@ -75,15 +85,20 @@ export function ConnectionModal({
   const [isConnecting, setIsConnecting] = useState(false);
   const [status, setStatus] = useState<"idle" | "success" | "error">("idle");
   const [errorMessage, setErrorMessage] = useState("");
+  const [savedProfiles, setSavedProfiles] = useState<ConnectionProfileResponse[]>([]);
+  const [profileName, setProfileName] = useState("");
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
 
   const form = parseConnectionString(connectionString);
   const [localForm, setLocalForm] = useState<ConnectionForm>(form);
 
-  // Sync when modal opens
+  // Load profiles and sync when modal opens
   useEffect(() => {
     if (isOpen) {
       setLocalForm(parseConnectionString(connectionString));
       setStatus(isConnected ? "success" : "idle");
+      listConnections().then(setSavedProfiles).catch(() => {});
     }
   }, [isOpen, connectionString, isConnected]);
 
@@ -91,6 +106,49 @@ export function ConnectionModal({
     const updated = { ...localForm, [field]: value };
     setLocalForm(updated);
     onConnectionStringChange(formToConnectionString(updated));
+  };
+
+  const selectProfile = (profile: ConnectionProfileResponse) => {
+    setProfileName(profile.name);
+    const newForm: ConnectionForm = {
+      host: profile.host,
+      port: profile.port,
+      user: profile.user,
+      password: profile.password,
+      database: profile.database,
+    };
+    setLocalForm(newForm);
+    onConnectionStringChange(formToConnectionString(newForm));
+  };
+
+  const handleDeleteProfile = async (name: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await deleteConnectionProfile(name);
+      setSavedProfiles(await listConnections());
+      if (profileName === name) setProfileName("");
+    } catch (err) {
+      console.error("Failed to delete profile:", err);
+    }
+  };
+
+  const handleSaveProfile = async () => {
+    if (!profileName.trim() || !localForm.host.trim()) return;
+    setSavingProfile(true);
+    setSaveSuccess(false);
+    try {
+      await saveConnectionProfile({
+        name: profileName,
+        ...localForm,
+      });
+      setSavedProfiles(await listConnections());
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 2000);
+    } catch (err) {
+      console.error("Failed to save profile:", err);
+    } finally {
+      setSavingProfile(false);
+    }
   };
 
   const handleConnect = async (e: React.FormEvent) => {
@@ -146,6 +204,42 @@ export function ConnectionModal({
             <X className="w-4 h-4 text-[var(--text-muted)]" />
           </button>
         </div>
+
+        {/* Saved Profiles */}
+        {savedProfiles.length > 0 && (
+          <div className="px-5 py-3 border-b border-[var(--border)] bg-[var(--bg-secondary)]/50">
+            <label className="text-xs font-medium text-[var(--text-muted)] flex items-center gap-1.5 mb-2">
+              <Bookmark className="w-3 h-3" />
+              Saved Connections
+            </label>
+            <div className="space-y-1">
+              {savedProfiles.map((profile) => (
+                <div
+                  key={profile.name}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-md cursor-pointer text-sm transition-colors ${
+                    profileName === profile.name
+                      ? "bg-[var(--accent)]/10 text-[var(--accent)]"
+                      : "hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
+                  }`}
+                  onClick={() => selectProfile(profile)}
+                >
+                  <Server className="w-3.5 h-3.5 flex-shrink-0" />
+                  <span className="flex-1 truncate">{profile.name}</span>
+                  <span className="text-xs text-[var(--text-muted)]">
+                    {profile.host}:{profile.port || "3306"}
+                  </span>
+                  <button
+                    onClick={(e) => handleDeleteProfile(profile.name, e)}
+                    className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--error)] transition-colors"
+                    title="Delete profile"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Form */}
         <form onSubmit={handleConnect} className="p-5 space-y-4">
@@ -223,6 +317,30 @@ export function ConnectionModal({
                 className="w-full px-3 py-2 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border)] text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] text-sm"
               />
             </div>
+          </div>
+
+          {/* Save Profile */}
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={profileName}
+              onChange={(e) => setProfileName(e.target.value)}
+              placeholder="Save as profile name..."
+              className="flex-1 px-3 py-2 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border)] text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] text-sm"
+            />
+            <button
+              type="button"
+              onClick={handleSaveProfile}
+              disabled={savingProfile || !profileName.trim() || !localForm.host.trim()}
+              className="px-3 py-2 rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-secondary)] text-sm font-medium hover:bg-[var(--border)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+            >
+              {saveSuccess ? (
+                <CheckCircle className="w-3.5 h-3.5 text-[var(--success)]" />
+              ) : (
+                <Save className="w-3.5 h-3.5" />
+              )}
+              {saveSuccess ? "Saved!" : "Save"}
+            </button>
           </div>
 
           {/* Error */}

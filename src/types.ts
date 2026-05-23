@@ -50,6 +50,15 @@ export interface LlmConfigResponse {
   model: string;
 }
 
+export interface ConnectionProfileResponse {
+  name: string;
+  host: string;
+  port: string;
+  user: string;
+  password: string;
+  database: string;
+}
+
 export interface UpdateLlmConfigRequest {
   url: string;
   model: string;

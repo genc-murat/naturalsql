@@ -12,8 +12,19 @@ pub struct LlmConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionProfile {
+    pub name: String,
+    pub host: String,
+    pub port: String,
+    pub user: String,
+    pub password: String,
+    pub database: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub llm: LlmConfig,
+    pub connections: Vec<ConnectionProfile>,
 }
 
 impl Default for AppConfig {
@@ -23,6 +34,7 @@ impl Default for AppConfig {
                 url: "http://localhost:11434".to_string(),
                 model: "gemma4:e2b".to_string(),
             },
+            connections: Vec::new(),
         }
     }
 }
@@ -33,9 +45,6 @@ static CONFIG: Lazy<Arc<RwLock<AppConfig>>> = Lazy::new(|| {
 });
 
 fn get_config_path() -> PathBuf {
-    // Same directory as the binary / tauri app
-    // During dev: src-tauri/config.json
-    // During prod: we use a writable app data location
     let dir = dirs_next::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("naturalsql");
@@ -49,7 +58,6 @@ fn load_config() -> Option<AppConfig> {
         let content = fs::read_to_string(&path).ok()?;
         serde_json::from_str(&content).ok()
     } else {
-        // Try to load from embedded config.json during dev
         let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config.json");
         if dev_path.exists() {
             let content = fs::read_to_string(&dev_path).ok()?;
@@ -64,14 +72,13 @@ pub fn save_config(config: &AppConfig) -> Result<(), String> {
     let path = get_config_path();
     let content = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
     fs::write(&path, content).map_err(|e| e.to_string())?;
-    
-    // Update in-memory config
+
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     rt.block_on(async {
         let mut guard = CONFIG.write().await;
         *guard = config.clone();
     });
-    
+
     Ok(())
 }
 
@@ -85,4 +92,27 @@ pub async fn get_llm_url() -> String {
 
 pub async fn get_llm_model() -> String {
     CONFIG.read().await.llm.model.clone()
+}
+
+pub async fn get_connections() -> Vec<ConnectionProfile> {
+    CONFIG.read().await.connections.clone()
+}
+
+pub async fn save_connection(profile: ConnectionProfile) -> Result<(), String> {
+    let mut config = CONFIG.read().await.clone();
+
+    // Check if profile with same name exists
+    if let Some(existing) = config.connections.iter_mut().find(|c| c.name == profile.name) {
+        *existing = profile;
+    } else {
+        config.connections.push(profile);
+    }
+
+    save_config(&config)
+}
+
+pub async fn delete_connection(name: String) -> Result<(), String> {
+    let mut config = CONFIG.read().await.clone();
+    config.connections.retain(|c| c.name != name);
+    save_config(&config)
 }

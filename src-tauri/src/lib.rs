@@ -24,6 +24,9 @@ pub fn run() {
             explain_sql,
             get_llm_config,
             update_llm_config,
+            list_connections,
+            save_connection_profile,
+            delete_connection_profile,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
