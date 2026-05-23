@@ -3,7 +3,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::time::Duration;
 
-use crate::db::schema::Schema;
+use crate::db::schema::{self, Schema};
 use crate::error::AppError;
 use crate::config;
 
@@ -137,23 +137,14 @@ pub async fn natural_language_to_sql_with_tools(
 
         eprintln!("[LLM] Raw response (first 300 chars): {}", text.chars().take(300).collect::<String>());
 
-        // Strip ALL markdown code block wrappers first
-        while text.starts_with("```") {
-            // Find the closing ```
-            if let Some(end) = text[3..].find("```") {
-                let inner = text[3..3+end].trim();
-                let after = text[3+end+3..].trim();
-                // If there's content after the code block, keep it
-                if after.is_empty() {
-                    text = inner.to_string();
-                } else {
-                    // Multiple blocks — keep everything
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
+        // Properly strip ALL markdown code blocks: ```lang\n...\n```
+        // Just remove lines that start with ``` and keep everything else
+        text = text.lines()
+            .filter(|line| !line.trim().starts_with("```"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
 
         eprintln!("[LLM] After strip: {}", text.chars().take(300).collect::<String>());
 
@@ -167,16 +158,11 @@ pub async fn natural_language_to_sql_with_tools(
             }
         }
 
-        // If not found, try to extract JSON from the beginning of the text
+        // If not found, try to extract JSON from anywhere in the text
         if !found_tool {
-            // Look for JSON object starting with {
-            if let Some(start) = text.find('{') {
-                // Try to find matching closing brace
-                let from_start = &text[start..];
-                if let Some(tool_call) = extract_first_json_object(from_start) {
-                    if let Some(tool_name) = tool_call.get("tool").and_then(|v| v.as_str()) {
-                        found_tool = process_tool_call(tool_name, &tool_call, all_schemas, &db_list, &mut conversation, &mut seen_tool_calls)?;
-                    }
+            if let Some(tool_call) = extract_first_json_object(&text) {
+                if let Some(tool_name) = tool_call.get("tool").and_then(|v| v.as_str()) {
+                    found_tool = process_tool_call(tool_name, &tool_call, all_schemas, &db_list, &mut conversation, &mut seen_tool_calls)?;
                 }
             }
         }
@@ -188,15 +174,21 @@ pub async fn natural_language_to_sql_with_tools(
         // Not a tool call — treat as final SQL
         let sql = extract_sql(&text);
 
-        if sql.is_empty() {
-            return Err(AppError::InvalidLlmResponse);
+        // If SQL is empty or looks like JSON, fall back to single-prompt
+        if sql.is_empty() || sql.starts_with('{') || sql.contains("\"tool\":") {
+            eprintln!("[LLM] No valid SQL, falling back to single-prompt");
+            let schema_context = schema::format_all_schemas_for_prompt(all_schemas);
+            return natural_language_to_sql(natural_language, &schema_context).await;
         }
 
         eprintln!("[LLM] Final SQL: {}", sql.chars().take(100).collect::<String>());
         return Ok(sql);
     }
 
-    Err(AppError::InvalidLlmResponse)
+    // Max iterations reached, fall back to single-prompt
+    eprintln!("[LLM] Max iterations reached, falling back to single-prompt");
+    let schema_context = schema::format_all_schemas_for_prompt(all_schemas);
+    natural_language_to_sql(natural_language, &schema_context).await
 }
 
 fn extract_first_json_object(text: &str) -> Option<serde_json::Value> {
@@ -241,9 +233,8 @@ fn process_tool_call(
 ) -> Result<bool, AppError> {
     let call_sig = tool_call.to_string();
     if seen_tool_calls.contains(&call_sig) {
-        eprintln!("[LLM] Repeated tool call, forcing SQL");
-        conversation.push_str("\n\nYou already called this tool. Now write the SQL query. Output ONLY the SQL.");
-        return Ok(false);
+        eprintln!("[LLM] Repeated tool call, falling back to single-prompt");
+        return Ok(false); // Signal caller to use fallback
     }
     seen_tool_calls.push(call_sig);
 
