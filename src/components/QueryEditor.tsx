@@ -14,8 +14,9 @@ import {
   Maximize2,
   X,
   AlertCircle,
+  BookOpen,
 } from "lucide-react";
-import { nlToSql, executeSql, explainSql } from "../api";
+import { nlToSql, executeSql, explainSql, explainSqlNatural } from "../api";
 import type { QueryResult, Schema } from "../types";
 
 interface QueryEditorProps {
@@ -41,6 +42,8 @@ export function QueryEditor({
     return window.matchMedia("(prefers-color-scheme: dark)").matches;
   });
   const [expanded, setExpanded] = useState(false);
+  const [sqlExplanation, setSqlExplanation] = useState("");
+  const [isExplaining, setIsExplaining] = useState(false);
 
   // Track theme changes
   useEffect(() => {
@@ -125,6 +128,23 @@ export function QueryEditor({
       setError(err instanceof Error ? err.message : "Explain failed");
     } finally {
       setIsExecuting(false);
+    }
+  };
+
+  const handleExplainNatural = async () => {
+    if (!sqlText.trim()) return;
+
+    setIsExplaining(true);
+    setSqlExplanation("");
+    setError("");
+
+    try {
+      const response = await explainSqlNatural({ sql: sqlText });
+      setSqlExplanation(response.explanation);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to explain query");
+    } finally {
+      setIsExplaining(false);
     }
   };
 
@@ -348,7 +368,20 @@ export function QueryEditor({
             ) : (
               <AlertCircle className="w-4 h-4" />
             )}
-            Explain
+            EXPLAIN
+          </button>
+          <button
+            onClick={handleExplainNatural}
+            disabled={isExplaining || !sqlText.trim()}
+            className="px-3 py-1.5 rounded-md bg-[var(--bg-tertiary)] text-[var(--text-secondary)] text-sm font-medium hover:bg-[var(--border)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+            title="Explain query in natural language"
+          >
+            {isExplaining ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <BookOpen className="w-4 h-4" />
+            )}
+            AI Explain
           </button>
           <button
             onClick={handleExecute}
@@ -369,6 +402,27 @@ export function QueryEditor({
       {error && (
         <div className="px-4 py-2 border-t border-red-500/20 bg-red-500/5 text-red-500 text-sm shrink-0">
           {error}
+        </div>
+      )}
+
+      {/* AI Explanation */}
+      {sqlExplanation && (
+        <div className="px-4 py-3 border-t border-[var(--border)] bg-[var(--bg-secondary)] shrink-0">
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex items-center gap-2 mb-1">
+              <BookOpen className="w-4 h-4 text-[var(--accent)]" />
+              <span className="text-sm font-medium text-[var(--text-primary)]">AI Explanation</span>
+            </div>
+            <button
+              onClick={() => setSqlExplanation("")}
+              className="p-1 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] transition-colors"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          <p className="text-sm text-[var(--text-secondary)] leading-relaxed whitespace-pre-wrap">
+            {sqlExplanation}
+          </p>
         </div>
       )}
     </div>

@@ -128,6 +128,66 @@ pub async fn explain_sql(request: ExecuteRequest) -> Result<query::QueryResult, 
     query::explain_query(&request.sql).await
 }
 
+// SQL → Natural Language explanation via LLM
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExplainNaturalRequest {
+    pub sql: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExplainNaturalResponse {
+    pub explanation: String,
+}
+
+#[tauri::command]
+pub async fn explain_sql_natural(request: ExplainNaturalRequest) -> Result<ExplainNaturalResponse, AppError> {
+    if request.sql.trim().is_empty() {
+        return Err(AppError::InvalidLlmResponse);
+    }
+
+    let prompt = format!(
+        "Given this MySQL query, explain in plain English what it does. \
+         Be concise but complete. Include what tables are used, what filtering is applied, \
+         and what the result represents.\n\n\
+         Query: {}",
+        request.sql
+    );
+
+    let url = config::get_llm_url().await;
+    let model = config::get_llm_model().await;
+
+    let ollama_request = reqwest::Client::new()
+        .post(&format!("{}/api/generate", url.trim_end_matches('/')))
+        .json(&serde_json::json!({
+            "model": model,
+            "prompt": prompt,
+            "stream": false,
+        }))
+        .send()
+        .await?;
+
+    if !ollama_request.status().is_success() {
+        return Err(AppError::QueryExecution(
+            format!("Ollama returned status: {}", ollama_request.status())
+        ));
+    }
+
+    #[derive(Deserialize)]
+    struct OllamaResp {
+        response: String,
+    }
+
+    let response: OllamaResp = ollama_request.json().await?;
+    let explanation = response.response.trim().to_string();
+
+    if explanation.is_empty() {
+        return Err(AppError::InvalidLlmResponse);
+    }
+
+    Ok(ExplainNaturalResponse { explanation })
+}
+
 #[tauri::command]
 pub async fn get_llm_config() -> Result<LlmConfigResponse, String> {
     let config = config::get_config().await;

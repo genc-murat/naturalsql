@@ -22,6 +22,7 @@ pub fn run() {
             nl_to_sql,
             execute_sql,
             explain_sql,
+            explain_sql_natural,
             get_llm_config,
             update_llm_config,
             list_connections,
