@@ -1,19 +1,37 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
+import CodeMirror from "@uiw/react-codemirror";
+import { sql, MySQL } from "@codemirror/lang-sql";
+import { vscodeDark, vscodeLight } from "@uiw/codemirror-theme-vscode";
 import { Send, Sparkles, Loader2, ArrowRight, Copy, Check } from "lucide-react";
 import { nlToSql, executeSql } from "../api";
-import type { QueryResult } from "../types";
+import type { QueryResult, Schema } from "../types";
 
 interface QueryEditorProps {
   onResult: (result: QueryResult) => void;
+  schema: Schema | null;
 }
 
-export function QueryEditor({ onResult }: QueryEditorProps) {
+export function QueryEditor({ onResult, schema }: QueryEditorProps) {
   const [naturalLanguage, setNaturalLanguage] = useState("");
-  const [sql, setSql] = useState("");
+  const [sqlText, setSqlText] = useState("");
   const [isTranslating, setIsTranslating] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [isDark, setIsDark] = useState(() => {
+    const saved = localStorage.getItem("naturalsql-theme");
+    if (saved) return saved === "dark";
+    return window.matchMedia("(prefers-color-scheme: dark)").matches;
+  });
+
+  // Update isDark when theme changes
+  useState(() => {
+    const observer = new MutationObserver(() => {
+      setIsDark(document.documentElement.classList.contains("dark"));
+    });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  });
 
   const handleTranslate = async () => {
     if (!naturalLanguage.trim()) return;
@@ -23,7 +41,7 @@ export function QueryEditor({ onResult }: QueryEditorProps) {
 
     try {
       const response = await nlToSql({ natural_language: naturalLanguage });
-      setSql(response.sql);
+      setSqlText(response.sql);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Translation failed");
     } finally {
@@ -31,15 +49,14 @@ export function QueryEditor({ onResult }: QueryEditorProps) {
     }
   };
 
-  const handleExecute = async (query?: string) => {
-    const queryToRun = query || sql;
-    if (!queryToRun.trim()) return;
+  const handleExecute = async () => {
+    if (!sqlText.trim()) return;
 
     setIsExecuting(true);
     setError("");
 
     try {
-      const result = await executeSql({ sql: queryToRun });
+      const result = await executeSql({ sql: sqlText });
       onResult(result);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Query execution failed");
@@ -49,16 +66,33 @@ export function QueryEditor({ onResult }: QueryEditorProps) {
   };
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(sql);
+    navigator.clipboard.writeText(sqlText);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-      handleExecute();
-    }
-  };
+  const extensions = useMemo(
+    () => [
+      sql({
+        dialect: MySQL,
+        upperCaseKeywords: true,
+        schema: {
+          tables: schema
+            ? schema.tables.map((t) => ({
+                label: t.name,
+                displayLabel: t.name,
+                columns: t.columns.map((c) => ({
+                  label: c.name,
+                  displayLabel: c.name,
+                  type: c.column_type,
+                })),
+              }))
+            : [],
+        },
+      }),
+    ],
+    [schema]
+  );
 
   return (
     <div className="space-y-3">
@@ -97,43 +131,62 @@ export function QueryEditor({ onResult }: QueryEditorProps) {
         <ArrowRight className="w-4 h-4 text-[var(--text-muted)]" />
       </div>
 
-      {/* SQL Preview */}
+      {/* SQL Editor */}
       <div className="space-y-2">
-        <label className="text-sm font-medium text-[var(--text-secondary)] flex items-center gap-2">
-          <span className="font-mono text-[var(--accent)]">SQL</span>
-          Preview
-        </label>
-        <div className="relative">
-          <textarea
-            value={sql}
-            onChange={(e) => setSql(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="SELECT * FROM ..."
-            rows={4}
-            className="w-full px-3 py-2 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border)] text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] font-mono text-sm resize-none pr-20"
-          />
-          <div className="absolute top-2 right-2 flex gap-1">
-            <button
-              onClick={handleCopy}
-              disabled={!sql}
-              className="p-1.5 rounded-md hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] disabled:opacity-30 transition-colors"
-              title="Copy SQL"
-            >
-              {copied ? (
-                <Check className="w-4 h-4 text-[var(--success)]" />
-              ) : (
-                <Copy className="w-4 h-4" />
-              )}
-            </button>
-          </div>
-        </div>
         <div className="flex items-center justify-between">
+          <label className="text-sm font-medium text-[var(--text-secondary)] flex items-center gap-2">
+            <span className="font-mono text-[var(--accent)]">SQL</span>
+            Editor
+          </label>
           <span className="text-xs text-[var(--text-muted)]">
             Ctrl+Enter to execute
           </span>
+        </div>
+        <div className="relative rounded-lg overflow-hidden border border-[var(--border)]">
+          <CodeMirror
+            value={sqlText}
+            onChange={(val) => setSqlText(val)}
+            extensions={extensions}
+            theme={isDark ? vscodeDark : vscodeLight}
+            minHeight="120px"
+            className="text-sm"
+            basicSetup={{
+              lineNumbers: true,
+              highlightActiveLineGutter: true,
+              highlightSpecialChars: true,
+              foldGutter: true,
+              drawSelection: true,
+              dropCursor: true,
+              allowMultipleSelections: true,
+              indentOnInput: true,
+              bracketMatching: true,
+              closeBrackets: true,
+              autocompletion: true,
+              rectangularSelection: true,
+              crosshairCursor: true,
+              highlightActiveLine: true,
+              highlightSelectionMatches: true,
+              syntaxHighlighting: true,
+              tabSize: 2,
+            }}
+          />
           <button
-            onClick={() => handleExecute()}
-            disabled={isExecuting || !sql.trim()}
+            onClick={handleCopy}
+            disabled={!sqlText}
+            className="absolute top-2 right-2 z-10 p-1.5 rounded-md bg-[var(--bg-secondary)]/80 hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] disabled:opacity-30 transition-colors"
+            title="Copy SQL"
+          >
+            {copied ? (
+              <Check className="w-4 h-4 text-[var(--success)]" />
+            ) : (
+              <Copy className="w-4 h-4" />
+            )}
+          </button>
+        </div>
+        <div className="flex justify-end">
+          <button
+            onClick={handleExecute}
+            disabled={isExecuting || !sqlText.trim()}
             className="px-4 py-2 rounded-lg bg-[var(--success)] text-white font-medium hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
           >
             {isExecuting ? (

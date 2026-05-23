@@ -134,7 +134,7 @@ function App() {
         <main className="flex-1 flex flex-col overflow-hidden">
           {/* Query Editor */}
           <div className="p-4 border-b border-[var(--border)] bg-[var(--bg-primary)]">
-            <QueryEditor onResult={handleResult} />
+            <QueryEditor onResult={handleResult} schema={schema} />
           </div>
 
           {/* Results */}
