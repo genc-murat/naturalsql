@@ -1,0 +1,44 @@
+// Types for Tauri commands
+export interface ConnectionStatus {
+  connected: boolean;
+}
+
+export interface ColumnInfo {
+  name: string;
+  column_type: string;
+  is_nullable: boolean;
+  column_key: string;
+}
+
+export interface TableInfo {
+  name: string;
+  columns: ColumnInfo[];
+}
+
+export interface Schema {
+  database: string;
+  tables: TableInfo[];
+}
+
+export interface SchemaResponse {
+  schema: Schema | null;
+}
+
+export interface NlToSqlRequest {
+  natural_language: string;
+  model?: string;
+}
+
+export interface SqlResponse {
+  sql: string;
+}
+
+export interface ExecuteRequest {
+  sql: string;
+}
+
+export interface QueryResult {
+  columns: string[];
+  rows: (string | number | boolean | null)[][];
+  row_count: number;
+}

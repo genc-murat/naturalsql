@@ -1,0 +1,25 @@
+[package]
+name = "naturalsql"
+version = "0.1.0"
+description = "Natural language SQL client powered by local LLM"
+authors = ["murad"]
+edition = "2021"
+
+[lib]
+name = "naturalsql_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+mysql_async = "0.34"
+reqwest = { version = "0.12", features = ["json"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+thiserror = "2"
+once_cell = "1"
+dirs-next = "2"
