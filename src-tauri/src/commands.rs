@@ -130,6 +130,88 @@ pub async fn explain_sql(request: ExecuteRequest) -> Result<query::QueryResult, 
 
 // SQL → Natural Language explanation via LLM
 
+// SQL Error → AI Fix
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FixSqlRequest {
+    pub sql: String,
+    pub error: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FixSqlResponse {
+    pub fixed_sql: String,
+    pub explanation: String,
+}
+
+#[tauri::command]
+pub async fn fix_sql(request: FixSqlRequest) -> Result<FixSqlResponse, AppError> {
+    if request.sql.trim().is_empty() {
+        return Err(AppError::InvalidLlmResponse);
+    }
+
+    let prompt = format!(
+        "This MySQL query produced the following error. Fix the query and explain what was wrong.\n\
+         Return ONLY the fixed SQL query on the first line, then a blank line, then a brief explanation.\n\
+         Do not include markdown code blocks or backticks.\n\n\
+         Query: {}\n\
+         Error: {}\n\n\
+         Fixed SQL:\n",
+        request.sql, request.error
+    );
+
+    let url = config::get_llm_url().await;
+    let model = config::get_llm_model().await;
+
+    let response = reqwest::Client::new()
+        .post(&format!("{}/api/generate", url.trim_end_matches('/')))
+        .json(&serde_json::json!({
+            "model": model,
+            "prompt": prompt,
+            "stream": false,
+        }))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(AppError::QueryExecution(
+            format!("Ollama returned status: {}", response.status())
+        ));
+    }
+
+    #[derive(Deserialize)]
+    struct OllamaResp {
+        response: String,
+    }
+
+    let body: OllamaResp = response.json().await?;
+    let text = body.response.trim().to_string();
+
+    // Split into SQL (first line(s)) and explanation (after blank line)
+    let parts: Vec<&str> = text.split("\n\n").collect();
+    let fixed_sql = parts.first()
+        .unwrap_or(&"")
+        .trim()
+        .trim_start_matches("```sql")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim()
+        .to_string();
+    let explanation = parts.get(1)
+        .unwrap_or(&"")
+        .trim()
+        .to_string();
+
+    if fixed_sql.is_empty() {
+        return Err(AppError::InvalidLlmResponse);
+    }
+
+    Ok(FixSqlResponse {
+        fixed_sql,
+        explanation,
+    })
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExplainNaturalRequest {
     pub sql: String,

@@ -59,6 +59,10 @@ export async function explainSqlNatural(request: ExecuteRequest): Promise<{ expl
   return invoke<{ explanation: string }>("explain_sql_natural", { request });
 }
 
+export async function fixSql(request: { sql: string; error: string }): Promise<{ fixed_sql: string; explanation: string }> {
+  return invoke<{ fixed_sql: string; explanation: string }>("fix_sql", { request });
+}
+
 export async function getLlmConfig(): Promise<LlmConfigResponse> {
   return invoke<LlmConfigResponse>("get_llm_config");
 }

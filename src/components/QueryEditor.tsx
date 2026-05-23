@@ -15,8 +15,10 @@ import {
   X,
   AlertCircle,
   BookOpen,
+  Wrench,
+  XCircle,
 } from "lucide-react";
-import { nlToSql, executeSql, explainSql, explainSqlNatural } from "../api";
+import { nlToSql, executeSql, explainSql, explainSqlNatural, fixSql } from "../api";
 import type { QueryResult, Schema } from "../types";
 
 interface QueryEditorProps {
@@ -44,6 +46,8 @@ export function QueryEditor({
   const [expanded, setExpanded] = useState(false);
   const [sqlExplanation, setSqlExplanation] = useState("");
   const [isExplaining, setIsExplaining] = useState(false);
+  const [sqlFix, setSqlFix] = useState<{ fixed: string; explanation: string } | null>(null);
+  const [isFixing, setIsFixing] = useState(false);
 
   // Track theme changes
   useEffect(() => {
@@ -145,6 +149,24 @@ export function QueryEditor({
       setError(err instanceof Error ? err.message : "Failed to explain query");
     } finally {
       setIsExplaining(false);
+    }
+  };
+
+  const handleFixSql = async () => {
+    if (!sqlText.trim() || !error) return;
+
+    setIsFixing(true);
+    setSqlFix(null);
+
+    try {
+      const response = await fixSql({ sql: sqlText, error });
+      setSqlFix({ fixed: response.fixed_sql, explanation: response.explanation });
+      // Auto-replace SQL with fixed version
+      setSqlText(response.fixed_sql);
+    } catch (err) {
+      // Keep the original error visible
+    } finally {
+      setIsFixing(false);
     }
   };
 
@@ -400,8 +422,49 @@ export function QueryEditor({
 
       {/* Error Bar */}
       {error && (
-        <div className="px-4 py-2 border-t border-red-500/20 bg-red-500/5 text-red-500 text-sm shrink-0">
-          {error}
+        <div className="px-4 py-2 border-t border-red-500/20 bg-red-500/5 shrink-0">
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex-1">
+              <div className="flex items-center gap-2 mb-1">
+                <XCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
+                <span className="text-sm font-medium text-red-500">Query Error</span>
+              </div>
+              <p className="text-xs text-red-400/80 whitespace-pre-wrap">{error}</p>
+            </div>
+            <button
+              onClick={handleFixSql}
+              disabled={isFixing}
+              className="px-3 py-1.5 rounded-md bg-red-500/20 text-red-400 text-xs font-medium hover:bg-red-500/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5 shrink-0"
+            >
+              {isFixing ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Wrench className="w-3.5 h-3.5" />
+              )}
+              Fix with AI
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* AI Fix Result */}
+      {sqlFix && (
+        <div className="px-4 py-3 border-t border-[var(--border)] bg-green-500/5 shrink-0">
+          <div className="flex items-start justify-between gap-2 mb-1">
+            <div className="flex items-center gap-2">
+              <Wrench className="w-4 h-4 text-green-500" />
+              <span className="text-sm font-medium text-green-500">Fixed by AI</span>
+            </div>
+            <button
+              onClick={() => setSqlFix(null)}
+              className="p-1 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] transition-colors"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          {sqlFix.explanation && (
+            <p className="text-xs text-[var(--text-secondary)] mb-2">{sqlFix.explanation}</p>
+          )}
         </div>
       )}
 
