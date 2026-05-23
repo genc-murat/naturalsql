@@ -75,6 +75,10 @@ export async function analyzeData(request: { question: string }): Promise<{ sql:
   return invoke<{ sql: string; answer: string; data: { columns: string[]; rows: unknown[][]; row_count: number } | null }>("analyze_data", { request });
 }
 
+export async function resultSetAction(request: { question: string; columns: string[]; sample_rows: unknown[][]; total_rows: number }): Promise<{ response: string; suggested_sql: string | null }> {
+  return invoke<{ response: string; suggested_sql: string | null }>("result_set_action", { request });
+}
+
 export async function getLlmConfig(): Promise<LlmConfigResponse> {
   return invoke<LlmConfigResponse>("get_llm_config");
 }

@@ -28,6 +28,7 @@ function App() {
   const [cachingDatabase, setCachingDatabase] = useState<string | null>(null);
   const [cacheError, setCacheError] = useState("");
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
+  const [pendingSql, setPendingSql] = useState("");
   const [connectionString, setConnectionString] = useState("");
   const [showLlmConfig, setShowLlmConfig] = useState(false);
   const [showAnalysisChat, setShowAnalysisChat] = useState(false);
@@ -316,6 +317,7 @@ function App() {
               schema={schema}
               selectedDatabase={selectedDatabase}
               tableNames={schema?.tables.map((t) => t.name) || []}
+              initialSql={pendingSql}
             />
           </div>
 
@@ -329,7 +331,12 @@ function App() {
 
           {/* Results Panel */}
           <div className="flex-1 min-h-0 overflow-auto p-3 bg-[var(--bg-primary)]">
-            <ResultsTable result={queryResult} />
+            <ResultsTable
+              result={queryResult}
+              onApplySql={(sql) => {
+                setPendingSql(sql);
+              }}
+            />
           </div>
         </main>
       </div>

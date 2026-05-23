@@ -580,6 +580,117 @@ pub async fn analyze_data(request: AnalyzeDataRequest) -> Result<AnalyzeDataResp
     })
 }
 
+// Result Set LLM Features
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ResultActionRequest {
+    pub question: String,
+    pub columns: Vec<String>,
+    pub sample_rows: Vec<Vec<serde_json::Value>>,
+    pub total_rows: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ResultActionResponse {
+    pub response: String,
+    pub suggested_sql: Option<String>,
+}
+
+#[tauri::command]
+pub async fn result_set_action(request: ResultActionRequest) -> Result<ResultActionResponse, AppError> {
+    if request.question.trim().is_empty() {
+        return Err(AppError::InvalidLlmResponse);
+    }
+
+    // Build a summary of the data
+    let col_names = request.columns.join(", ");
+    let sample: Vec<String> = request.sample_rows.iter().take(3).map(|row| {
+        row.iter().map(|v| match v {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Null => "NULL".to_string(),
+            other => other.to_string(),
+        }).collect::<Vec<_>>().join(", ")
+    }).collect();
+
+    let data_summary = format!(
+        "Columns: {}\nTotal rows: {}\nSample data:\n{}",
+        col_names, request.total_rows, sample.join("\n")
+    );
+
+    let prompt = format!(
+        "You are a MySQL data analyst. Given the following query result data and the user's request,\n\
+         provide your response.\n\n\
+         If the user asks for aggregation, filtering, or transformation, also provide the SQL query\n\
+         that would achieve this on the same table(s) the data came from.\n\n\
+         {}\\n\n\
+         User request: {}\n\n\
+         Response:",
+        data_summary, request.question
+    );
+
+    let url = config::get_llm_url().await;
+    let model = config::get_llm_model().await;
+
+    let response = reqwest::Client::new()
+        .post(&format!("{}/api/generate", url.trim_end_matches('/')))
+        .json(&serde_json::json!({
+            "model": model,
+            "prompt": prompt,
+            "stream": false,
+        }))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(AppError::QueryExecution(
+            format!("Ollama returned status: {}", response.status())
+        ));
+    }
+
+    #[derive(Deserialize)]
+    struct OllamaResp { response: String }
+
+    let body: OllamaResp = response.json().await?;
+    let text = body.response.trim().to_string();
+
+    // Try to extract SQL if present
+    let mut suggested_sql = None;
+    if let Some(idx) = text.find("```sql") {
+        let after = &text[idx + 6..];
+        if let Some(end) = after.find("```") {
+            let sql = after[..end].trim().to_string();
+            if !sql.is_empty() {
+                suggested_sql = Some(sql);
+            }
+        }
+    } else if let Some(idx) = text.find("SELECT") {
+        let after = &text[idx..];
+        let sql: String = after.lines().take_while(|l| {
+            let t = l.trim();
+            !t.is_empty() && !t.starts_with('#') && !t.starts_with("//")
+        }).collect::<Vec<_>>().join(" ");
+        if !sql.is_empty() {
+            suggested_sql = Some(sql);
+        }
+    }
+
+    // Clean response text - remove SQL blocks for readability
+    let clean_response = text
+        .replace("```sql\n", "\n")
+        .replace("```", "")
+        .trim()
+        .to_string();
+
+    Ok(ResultActionResponse {
+        response: if suggested_sql.is_some() {
+            clean_response
+        } else {
+            text
+        },
+        suggested_sql,
+    })
+}
+
 #[tauri::command]
 pub async fn get_llm_config() -> Result<LlmConfigResponse, String> {
     let config = config::get_config().await;

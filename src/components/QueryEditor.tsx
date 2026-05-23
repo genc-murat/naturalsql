@@ -29,6 +29,7 @@ interface QueryEditorProps {
   schema: Schema | null;
   selectedDatabase: string | null;
   tableNames?: string[];
+  initialSql?: string;
 }
 
 export function QueryEditor({
@@ -36,6 +37,7 @@ export function QueryEditor({
   schema,
   selectedDatabase,
   tableNames = [],
+  initialSql = "",
 }: QueryEditorProps) {
   const [naturalLanguage, setNaturalLanguage] = useState("");
   const [sqlText, setSqlText] = useState("");
@@ -68,6 +70,13 @@ export function QueryEditor({
     });
     return () => observer.disconnect();
   }, []);
+
+  // Update SQL when initialSql changes (from ResultActions)
+  useEffect(() => {
+    if (initialSql) {
+      setSqlText(initialSql);
+    }
+  }, [initialSql]);
 
   const extensions = useMemo(
     () => [

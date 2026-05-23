@@ -27,6 +27,7 @@ pub fn run() {
             optimize_sql,
             build_join,
             analyze_data,
+            result_set_action,
             get_llm_config,
             update_llm_config,
             list_connections,

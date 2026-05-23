@@ -21,9 +21,11 @@ import {
   Clock,
 } from "lucide-react";
 import type { QueryResult } from "../types";
+import { ResultActions } from "./ResultActions";
 
 interface ResultsTableProps {
   result: QueryResult | null;
+  onApplySql?: (sql: string) => void;
 }
 
 interface ContextMenuState {
@@ -33,7 +35,7 @@ interface ContextMenuState {
   column: string;
 }
 
-export function ResultsTable({ result }: ResultsTableProps) {
+export function ResultsTable({ result, onApplySql }: ResultsTableProps) {
   const [sorting, setSorting] = useState<SortingState>([]);
   const [pageIndex, setPageIndex] = useState(0);
   const pageSize = 50;
@@ -240,6 +242,14 @@ export function ResultsTable({ result }: ResultsTableProps) {
           </div>
         </div>
       )}
+
+      {/* AI Result Actions */}
+      <ResultActions
+        columns={result.columns}
+        rows={result.rows}
+        rowCount={result.row_count}
+        onApplySql={onApplySql || (() => {})}
+      />
 
       {/* Pagination */}
       {totalPages > 1 && (
