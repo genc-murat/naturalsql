@@ -225,7 +225,7 @@ pub async fn natural_language_to_sql_with_tools(
 }
 
 async fn call_ollama_generate(
-    url: &str,
+    _url: &str,
     model: &str,
     client: &reqwest::Client,
     api_url: &str,
