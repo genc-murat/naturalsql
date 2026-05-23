@@ -46,7 +46,11 @@ pub struct UpdateLlmConfigRequest {
 
 #[tauri::command]
 pub async fn connect_db(connection_string: String) -> Result<ConnectionStatus, AppError> {
+    let default_db = connection::get_connection_database(&connection_string);
     connection::connect(&connection_string).await?;
+    // Return the default database name from the connection string (if any)
+    // The frontend can use this to auto-select
+    let _ = default_db; // stored for now, frontend will parse
     Ok(ConnectionStatus { connected: true })
 }
 
@@ -88,6 +92,11 @@ pub async fn get_cached_schema(database: String) -> Result<SchemaResponse, AppEr
 #[tauri::command]
 pub async fn list_cached_databases() -> Result<Vec<String>, AppError> {
     schema::list_cached_databases()
+}
+
+#[tauri::command]
+pub async fn remove_cached_schema(database: String) -> Result<(), AppError> {
+    schema::remove_cached_schema(&database)
 }
 
 #[tauri::command]

@@ -11,6 +11,7 @@ import {
   cacheSchema,
   getCachedSchema,
   listCachedDatabases,
+  removeCachedSchema,
   getLlmConfig,
 } from "./api";
 import type { Schema, QueryResult, LlmConfigResponse } from "./types";
@@ -36,6 +37,19 @@ function App() {
     listCachedDatabases().then((dbs) => setCachedDatabases(dbs)).catch(() => {});
   }, []);
 
+  // Parse database name from connection string
+  const parseDatabaseFromUrl = (url: string): string | null => {
+    try {
+      const afterAt = url.split('@')[1];
+      if (!afterAt) return null;
+      const dbPart = afterAt.split('/')[1];
+      if (!dbPart) return null;
+      return dbPart.split('?')[0] || null;
+    } catch {
+      return null;
+    }
+  };
+
   const handleConnected = useCallback(async () => {
     setIsConnected(true);
     setQueryResult(null);
@@ -47,10 +61,25 @@ function App() {
     try {
       const dbs = await listDatabases();
       setDatabases(dbs);
+
+      // Auto-select database from connection string if specified
+      const parsed = parseDatabaseFromUrl(connectionString);
+      if (parsed && dbs.includes(parsed)) {
+        setSelectedDatabase(parsed);
+        // Try to load cached schema
+        try {
+          const res = await getCachedSchema(parsed);
+          if (res.schema) {
+            setSchema(res.schema);
+          }
+        } catch {
+          // No cached schema yet
+        }
+      }
     } catch {
       setDatabases([]);
     }
-  }, []);
+  }, [connectionString]);
 
   const handleDisconnected = useCallback(() => {
     setIsConnected(false);
@@ -98,6 +127,20 @@ function App() {
       setCachingDatabase(null);
     }
   }, []);
+
+  const handleClearCache = useCallback(async (db: string) => {
+    try {
+      await removeCachedSchema(db);
+      if (selectedDatabase === db) {
+        setSchema(null);
+        setSelectedDatabase(null);
+      }
+      const cached = await listCachedDatabases();
+      setCachedDatabases(cached);
+    } catch (err) {
+      setCacheError(err instanceof Error ? err.message : "Failed to clear cache");
+    }
+  }, [selectedDatabase]);
 
   const handleResult = useCallback((result: QueryResult) => {
     setQueryResult(result);
@@ -148,6 +191,7 @@ function App() {
               selectedDatabase={selectedDatabase}
               onSelectDatabase={handleSelectDatabase}
               onCacheDatabase={handleCacheDatabase}
+              onClearCache={handleClearCache}
               isCaching={isCaching}
               cachingDatabase={cachingDatabase}
             />

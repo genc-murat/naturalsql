@@ -38,6 +38,10 @@ export async function listCachedDatabases(): Promise<string[]> {
   return invoke<string[]>("list_cached_databases");
 }
 
+export async function removeCachedSchema(database: string): Promise<void> {
+  return invoke("remove_cached_schema", { database });
+}
+
 export async function nlToSql(request: NlToSqlRequest): Promise<SqlResponse> {
   return invoke<SqlResponse>("nl_to_sql", { request });
 }

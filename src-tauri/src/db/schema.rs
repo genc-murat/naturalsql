@@ -208,6 +208,7 @@ pub fn load_cached_schema(database: &str) -> Result<Option<Schema>, AppError> {
     }))
 }
 
+#[allow(dead_code)]
 pub fn remove_cached_schema(database: &str) -> Result<(), AppError> {
     let path = get_cache_path();
     if !path.exists() {

@@ -61,7 +61,8 @@ pub async fn list_databases() -> Result<Vec<String>, AppError> {
     Ok(databases)
 }
 
-pub async fn get_connection_database(connection_string: &str) -> Result<Option<String>, AppError> {
+#[allow(dead_code)]
+pub fn get_connection_database(connection_string: &str) -> Option<String> {
     // Parse database name from connection string URL
     // mysql://user:pass@host:port/database
     if let Some(at_pos) = connection_string.find('@') {
@@ -70,9 +71,9 @@ pub async fn get_connection_database(connection_string: &str) -> Result<Option<S
             let db_part = &after_at[slash_pos + 1..];
             let db = db_part.split('?').next().unwrap_or("");
             if !db.is_empty() {
-                return Ok(Some(db.to_string()));
+                return Some(db.to_string());
             }
         }
     }
-    Ok(None)
+    None
 }

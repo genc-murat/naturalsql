@@ -18,6 +18,7 @@ pub fn run() {
             cache_schema,
             get_cached_schema,
             list_cached_databases,
+            remove_cached_schema,
             nl_to_sql,
             execute_sql,
             get_llm_config,
