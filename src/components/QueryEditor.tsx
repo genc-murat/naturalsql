@@ -18,20 +18,24 @@ import {
   Wrench,
   XCircle,
   Zap,
+  GitBranch,
 } from "lucide-react";
 import { nlToSql, executeSql, explainSql, explainSqlNatural, fixSql, optimizeSql } from "../api";
+import { JoinBuilder } from "./JoinBuilder";
 import type { QueryResult, Schema } from "../types";
 
 interface QueryEditorProps {
   onResult: (result: QueryResult) => void;
   schema: Schema | null;
   selectedDatabase: string | null;
+  tableNames?: string[];
 }
 
 export function QueryEditor({
   onResult,
   schema,
   selectedDatabase,
+  tableNames = [],
 }: QueryEditorProps) {
   const [naturalLanguage, setNaturalLanguage] = useState("");
   const [sqlText, setSqlText] = useState("");
@@ -51,6 +55,7 @@ export function QueryEditor({
   const [isFixing, setIsFixing] = useState(false);
   const [sqlOptimization, setSqlOptimization] = useState<{ suggestions: string; optimized_sql: string | null } | null>(null);
   const [isOptimizing, setIsOptimizing] = useState(false);
+  const [showJoinBuilder, setShowJoinBuilder] = useState(false);
 
   // Track theme changes
   useEffect(() => {
@@ -442,6 +447,14 @@ export function QueryEditor({
             Optimize
           </button>
           <button
+            onClick={() => setShowJoinBuilder(true)}
+            className="px-3 py-1.5 rounded-md bg-[var(--bg-tertiary)] text-[var(--text-secondary)] text-sm font-medium hover:bg-[var(--border)] transition-colors flex items-center gap-1.5"
+            title="Build JOIN queries visually"
+          >
+            <GitBranch className="w-4 h-4" />
+            Join Builder
+          </button>
+          <button
             onClick={handleExecute}
             disabled={isExecuting || !sqlText.trim()}
             className="px-4 py-1.5 rounded-md bg-[var(--success)] text-white text-sm font-medium hover:bg-green-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
@@ -550,6 +563,17 @@ export function QueryEditor({
           </p>
         </div>
       )}
+
+      {/* Join Builder Modal */}
+      <JoinBuilder
+        isOpen={showJoinBuilder}
+        onClose={() => setShowJoinBuilder(false)}
+        onApply={(sql) => {
+          setSqlText(sql);
+          setShowJoinBuilder(false);
+        }}
+        tableNames={tableNames}
+      />
     </div>
   );
 }

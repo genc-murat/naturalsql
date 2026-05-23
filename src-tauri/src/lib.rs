@@ -25,6 +25,7 @@ pub fn run() {
             explain_sql_natural,
             fix_sql,
             optimize_sql,
+            build_join,
             get_llm_config,
             update_llm_config,
             list_connections,

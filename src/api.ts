@@ -67,6 +67,10 @@ export async function optimizeSql(request: { sql: string }): Promise<{ original_
   return invoke<{ original_explain: string; suggestions: string; optimized_sql: string | null }>("optimize_sql", { request });
 }
 
+export async function buildJoin(request: { description: string }): Promise<{ sql: string }> {
+  return invoke<{ sql: string }>("build_join", { request });
+}
+
 export async function getLlmConfig(): Promise<LlmConfigResponse> {
   return invoke<LlmConfigResponse>("get_llm_config");
 }

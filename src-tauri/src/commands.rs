@@ -374,6 +374,80 @@ pub async fn optimize_sql(request: OptimizeSqlRequest) -> Result<OptimizeSqlResp
     })
 }
 
+// Smart Join Builder - Natural language to JOIN SQL
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BuildJoinRequest {
+    pub description: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BuildJoinResponse {
+    pub sql: String,
+}
+
+#[tauri::command]
+pub async fn build_join(request: BuildJoinRequest) -> Result<BuildJoinResponse, AppError> {
+    if request.description.trim().is_empty() {
+        return Err(AppError::InvalidLlmResponse);
+    }
+
+    // Load all cached schemas for context
+    let all_schemas = schema::load_all_cached_schemas()?;
+    let schema_context = if all_schemas.is_empty() {
+        "No schema information available. Use standard table names.".to_string()
+    } else {
+        schema::format_all_schemas_for_prompt(&all_schemas)
+    };
+
+    let prompt = format!(
+        "You are a MySQL expert. Given the database schema below, generate a SQL JOIN query \
+         based on the user's description. Return ONLY the SQL query, no explanations, no markdown.\n\n\
+         {}\n\
+         User request: {}\n\n\
+         SQL:",
+        schema_context, request.description
+    );
+
+    let url = config::get_llm_url().await;
+    let model = config::get_llm_model().await;
+
+    let response = reqwest::Client::new()
+        .post(&format!("{}/api/generate", url.trim_end_matches('/')))
+        .json(&serde_json::json!({
+            "model": model,
+            "prompt": prompt,
+            "stream": false,
+        }))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(AppError::QueryExecution(
+            format!("Ollama returned status: {}", response.status())
+        ));
+    }
+
+    #[derive(Deserialize)]
+    struct OllamaResp {
+        response: String,
+    }
+
+    let body: OllamaResp = response.json().await?;
+    let sql = body.response.trim()
+        .trim_start_matches("```sql")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim()
+        .to_string();
+
+    if sql.is_empty() {
+        return Err(AppError::InvalidLlmResponse);
+    }
+
+    Ok(BuildJoinResponse { sql })
+}
+
 #[tauri::command]
 pub async fn get_llm_config() -> Result<LlmConfigResponse, String> {
     let config = config::get_config().await;

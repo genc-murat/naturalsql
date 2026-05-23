@@ -309,6 +309,7 @@ function App() {
               onResult={handleResult}
               schema={schema}
               selectedDatabase={selectedDatabase}
+              tableNames={schema?.tables.map((t) => t.name) || []}
             />
           </div>
 
