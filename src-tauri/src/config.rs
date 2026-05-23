@@ -1,9 +1,7 @@
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
@@ -39,10 +37,25 @@ impl Default for AppConfig {
     }
 }
 
-static CONFIG: Lazy<Arc<RwLock<AppConfig>>> = Lazy::new(|| {
-    let config = load_config().unwrap_or_default();
-    Arc::new(RwLock::new(config))
+// Use a synchronous Mutex for in-memory state - file I/O is the slow part anyway
+pub static CONFIG: Mutex<AppConfig> = Mutex::new(AppConfig {
+    llm: LlmConfig {
+        url: String::new(),
+        model: String::new(),
+    },
+    connections: Vec::new(),
 });
+
+static INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn ensure_initialized() {
+    if !INITIALIZED.load(std::sync::atomic::Ordering::SeqCst) {
+        let config = load_config().unwrap_or_default();
+        let mut guard = CONFIG.lock().unwrap();
+        *guard = config;
+        INITIALIZED.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 fn get_config_path() -> PathBuf {
     let dir = dirs_next::config_dir()
@@ -68,38 +81,48 @@ fn load_config() -> Option<AppConfig> {
     }
 }
 
-pub fn save_config(config: &AppConfig) -> Result<(), String> {
+fn save_config_sync(config: &AppConfig) -> Result<(), String> {
     let path = get_config_path();
     let content = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
     fs::write(&path, content).map_err(|e| e.to_string())?;
 
-    let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-    rt.block_on(async {
-        let mut guard = CONFIG.write().await;
-        *guard = config.clone();
-    });
+    // Update in-memory state
+    let mut guard = CONFIG.lock().map_err(|e| e.to_string())?;
+    *guard = config.clone();
 
     Ok(())
 }
 
 pub async fn get_config() -> AppConfig {
-    CONFIG.read().await.clone()
+    ensure_initialized();
+    let guard = CONFIG.lock().unwrap();
+    guard.clone()
 }
 
 pub async fn get_llm_url() -> String {
-    CONFIG.read().await.llm.url.clone()
+    ensure_initialized();
+    let guard = CONFIG.lock().unwrap();
+    guard.llm.url.clone()
 }
 
 pub async fn get_llm_model() -> String {
-    CONFIG.read().await.llm.model.clone()
+    ensure_initialized();
+    let guard = CONFIG.lock().unwrap();
+    guard.llm.model.clone()
 }
 
 pub async fn get_connections() -> Vec<ConnectionProfile> {
-    CONFIG.read().await.connections.clone()
+    ensure_initialized();
+    let guard = CONFIG.lock().unwrap();
+    guard.connections.clone()
 }
 
 pub async fn save_connection(profile: ConnectionProfile) -> Result<(), String> {
-    let mut config = CONFIG.read().await.clone();
+    ensure_initialized();
+    let mut config = {
+        let guard = CONFIG.lock().map_err(|e| e.to_string())?;
+        guard.clone()
+    };
 
     // Check if profile with same name exists
     if let Some(existing) = config.connections.iter_mut().find(|c| c.name == profile.name) {
@@ -108,11 +131,16 @@ pub async fn save_connection(profile: ConnectionProfile) -> Result<(), String> {
         config.connections.push(profile);
     }
 
-    save_config(&config)
+    save_config_sync(&config)
 }
 
 pub async fn delete_connection(name: String) -> Result<(), String> {
-    let mut config = CONFIG.read().await.clone();
+    ensure_initialized();
+    let mut config = {
+        let guard = CONFIG.lock().map_err(|e| e.to_string())?;
+        guard.clone()
+    };
+
     config.connections.retain(|c| c.name != name);
-    save_config(&config)
+    save_config_sync(&config)
 }

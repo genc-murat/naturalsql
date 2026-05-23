@@ -152,7 +152,18 @@ pub async fn update_llm_config(request: UpdateLlmConfigRequest) -> Result<LlmCon
         model: request.model.clone(),
     };
 
-    config::save_config(&config)?;
+    // Update in-memory config and save to disk
+    {
+        let path = dirs_next::config_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("naturalsql")
+            .join("config.json");
+        let content = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+        std::fs::write(&path, content).map_err(|e| e.to_string())?;
+        // Update in-memory
+        let mut guard = crate::config::CONFIG.lock().map_err(|e| e.to_string())?;
+        *guard = config.clone();
+    }
 
     Ok(LlmConfigResponse {
         url: request.url,
