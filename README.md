@@ -20,9 +20,11 @@ A modern desktop SQL client that lets you query MySQL databases using **natural 
 - **Schema Caching**: Per-database schema cache persisted to SQLite — cache once, use forever
 - **Auto-Select**: If you specify a database in the connection string, it's auto-selected on connect
 
-### AI-Powered SQL Generation
+## AI-Powered SQL Generation
 - **NL → SQL**: Natural language question + schema context → generated SQL via Ollama
-- **Cross-Database JOINs**: Cache multiple schemas, LLM sees all tables and can write cross-database JOINs
+  - **Smart Schema Discovery** (tool calling): LLM discovers tables/columns iteratively using function calling — only loads what it needs
+  - **Fallback**: If model doesn't support tool calling, automatically uses single-prompt with all cached schemas
+  - **Cross-Database JOINs**: LLM can discover tables across multiple databases and write cross-database JOINs
 - **Smart Join Builder**: Modal with manual (dropdowns for tables/columns/join type) and AI (natural language description) modes
 
 ### AI-Powered SQL Enhancement
@@ -158,6 +160,22 @@ Drag the divider between sidebar and main area, or between editor and results, t
      │  5.6+     │                  │  Server   │
      └───────────┘                  └───────────┘
 ```
+
+## Model Compatibility
+
+### Tool Calling (Recommended)
+For the best cross-database schema discovery experience, use a model that supports function calling:
+- **Google AI / Vertex API**: `gemma-4` with function calling via `ai.google.dev`
+- **Ollama**: Models with tool calling support (check [Ollama docs](https://ollama.com/blog/tool-support))
+
+When tool calling is unavailable, NaturalSQL automatically falls back to the single-prompt approach, which loads all cached schemas into the context. This works well for smaller numbers of tables but may struggle with very large schemas.
+
+### Recommended Models
+| Model | Size | Tool Calling | Notes |
+|---|---|---|---|
+| `gemma4:e2b` | ~2B | Via Google API | Fast, good for SQL |
+| `llama3.2` | ~3B | Ollama supported | Well-tested |
+| `qwen2.5-coder` | ~3B | Ollama supported | Great for code generation |
 
 ## Configuration
 
