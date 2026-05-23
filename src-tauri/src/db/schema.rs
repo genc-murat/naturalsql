@@ -279,6 +279,8 @@ pub fn remove_cached_schema(database: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Format a single schema for prompt (used for single-database queries)
+#[allow(dead_code)]
 pub fn format_schema_for_prompt(schema: &Schema) -> String {
     let mut result = format!("Database: {}\n\n", schema.database);
     for table in &schema.tables {
