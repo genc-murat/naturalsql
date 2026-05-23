@@ -13,6 +13,7 @@ import {
   listCachedDatabases,
   removeCachedSchema,
   getLlmConfig,
+  executeSql,
 } from "./api";
 import type { Schema, QueryResult, LlmConfigResponse } from "./types";
 import "./App.css";
@@ -201,6 +202,16 @@ function App() {
     setQueryResult(result);
   }, []);
 
+  const handleViewData = useCallback(async (database: string, table: string) => {
+    const sql = `SELECT * FROM \`${database}\`.\`${table}\` LIMIT 100`;
+    try {
+      const result = await executeSql({ sql });
+      setQueryResult(result);
+    } catch (err) {
+      // Error will be shown in QueryEditor
+    }
+  }, []);
+
   return (
     <div className="h-screen flex flex-col bg-[var(--bg-primary)]">
       {/* Header */}
@@ -270,6 +281,7 @@ function App() {
               onSelectDatabase={handleSelectDatabase}
               onCacheDatabase={handleCacheDatabase}
               onClearCache={handleClearCache}
+              onViewData={handleViewData}
               isCaching={isCaching}
               cachingDatabase={cachingDatabase}
             />

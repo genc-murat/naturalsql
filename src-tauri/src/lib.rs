@@ -21,6 +21,7 @@ pub fn run() {
             remove_cached_schema,
             nl_to_sql,
             execute_sql,
+            explain_sql,
             get_llm_config,
             update_llm_config,
         ])

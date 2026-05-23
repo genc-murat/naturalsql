@@ -41,6 +41,8 @@ export interface QueryResult {
   columns: string[];
   rows: (string | number | boolean | null)[][];
   row_count: number;
+  execution_time_ms: number;
+  affected_rows: number | null;
 }
 
 export interface LlmConfigResponse {

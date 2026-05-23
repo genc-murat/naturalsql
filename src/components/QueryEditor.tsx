@@ -13,8 +13,9 @@ import {
   Wand2,
   Maximize2,
   X,
+  AlertCircle,
 } from "lucide-react";
-import { nlToSql, executeSql } from "../api";
+import { nlToSql, executeSql, explainSql } from "../api";
 import type { QueryResult, Schema } from "../types";
 
 interface QueryEditorProps {
@@ -106,6 +107,22 @@ export function QueryEditor({
       onResult(result);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Query execution failed");
+    } finally {
+      setIsExecuting(false);
+    }
+  };
+
+  const handleExplain = async () => {
+    if (!sqlText.trim()) return;
+
+    setIsExecuting(true);
+    setError("");
+
+    try {
+      const result = await explainSql({ sql: sqlText });
+      onResult(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Explain failed");
     } finally {
       setIsExecuting(false);
     }
@@ -320,6 +337,19 @@ export function QueryEditor({
             </kbd>
             to run
           </span>
+          <button
+            onClick={handleExplain}
+            disabled={isExecuting || !sqlText.trim()}
+            className="px-3 py-1.5 rounded-md bg-[var(--bg-tertiary)] text-[var(--text-secondary)] text-sm font-medium hover:bg-[var(--border)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+            title="Show execution plan"
+          >
+            {isExecuting ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <AlertCircle className="w-4 h-4" />
+            )}
+            Explain
+          </button>
           <button
             onClick={handleExecute}
             disabled={isExecuting || !sqlText.trim()}

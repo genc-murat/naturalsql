@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import {
   useReactTable,
   getCoreRowModel,
@@ -8,17 +8,53 @@ import {
   createColumnHelper,
   SortingState,
 } from "@tanstack/react-table";
-import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
+  Copy,
+  Check,
+  Clock,
+} from "lucide-react";
 import type { QueryResult } from "../types";
 
 interface ResultsTableProps {
   result: QueryResult | null;
 }
 
+interface ContextMenuState {
+  x: number;
+  y: number;
+  value: string;
+  column: string;
+}
+
 export function ResultsTable({ result }: ResultsTableProps) {
   const [sorting, setSorting] = useState<SortingState>([]);
   const [pageIndex, setPageIndex] = useState(0);
   const pageSize = 50;
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  // Close context menu on click outside
+  useEffect(() => {
+    const handleClick = () => setContextMenu(null);
+    if (contextMenu) {
+      window.addEventListener("click", handleClick);
+      return () => window.removeEventListener("click", handleClick);
+    }
+  }, [contextMenu]);
+
+  const handleCopy = async (value: string) => {
+    await navigator.clipboard.writeText(value);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+    setContextMenu(null);
+  };
 
   const columns = useMemo(() => {
     if (!result || result.columns.length === 0) return [];
@@ -85,13 +121,28 @@ export function ResultsTable({ result }: ResultsTableProps) {
   const totalPages = table.getPageCount();
   const currentPage = table.getState().pagination.pageIndex + 1;
 
+  // Format execution time
+  const execTime = result.execution_time_ms;
+  const timeStr = execTime < 1000 ? `${execTime}ms` : `${(execTime / 1000).toFixed(1)}s`;
+
+  // Status badge
+  const isWrite = result.affected_rows !== null && result.affected_rows !== undefined;
+
   return (
     <div className="space-y-3">
-      {/* Results header */}
+      {/* Results header with execution stats */}
       <div className="flex items-center justify-between">
-        <span className="text-sm text-[var(--text-secondary)]">
-          {result.row_count} row{result.row_count !== 1 ? "s" : ""} returned
-        </span>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-[var(--text-secondary)]">
+            {isWrite
+              ? `${result.affected_rows} row${result.affected_rows !== 1 ? "s" : ""} affected`
+              : `${result.row_count} row${result.row_count !== 1 ? "s" : ""} returned`}
+          </span>
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-[var(--bg-secondary)] border border-[var(--border)] text-xs text-[var(--text-muted)]">
+            <Clock className="w-3 h-3" />
+            {timeStr}
+          </span>
+        </div>
         {totalPages > 1 && (
           <span className="text-sm text-[var(--text-muted)]">
             Page {currentPage} of {totalPages}
@@ -137,6 +188,15 @@ export function ResultsTable({ result }: ResultsTableProps) {
                   return (
                     <td
                       key={cell.id}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        setContextMenu({
+                          x: e.clientX,
+                          y: e.clientY,
+                          value: raw === null || raw === undefined ? "NULL" : String(raw),
+                          column: cell.column.id,
+                        });
+                      }}
                       className="px-3 py-2 border-b border-[var(--border)] text-[var(--text-primary)] whitespace-nowrap max-w-[300px] truncate"
                       title={displayValue}
                     >
@@ -149,6 +209,37 @@ export function ResultsTable({ result }: ResultsTableProps) {
           </tbody>
         </table>
       </div>
+
+      {/* Context Menu */}
+      {contextMenu && (
+        <div
+          className="fixed z-50 min-w-[160px] rounded-lg bg-[var(--bg-primary)] border border-[var(--border)] shadow-xl py-1"
+          style={{ top: contextMenu.y, left: contextMenu.x }}
+        >
+          <button
+            onClick={() => handleCopy(contextMenu.value)}
+            className="w-full px-3 py-2 text-sm text-left hover:bg-[var(--bg-secondary)] flex items-center gap-2 text-[var(--text-primary)]"
+          >
+            {copied ? (
+              <Check className="w-3.5 h-3.5 text-[var(--success)]" />
+            ) : (
+              <Copy className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+            )}
+            {copied ? "Copied!" : "Copy Value"}
+          </button>
+          <button
+            onClick={() => handleCopy(contextMenu.column)}
+            className="w-full px-3 py-2 text-sm text-left hover:bg-[var(--bg-secondary)] flex items-center gap-2 text-[var(--text-primary)]"
+          >
+            <Copy className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+            Copy Column Name
+          </button>
+          <div className="my-1 border-t border-[var(--border)]" />
+          <div className="px-3 py-1.5 text-xs text-[var(--text-muted)] max-w-[200px] truncate font-mono">
+            {contextMenu.value}
+          </div>
+        </div>
+      )}
 
       {/* Pagination */}
       {totalPages > 1 && (

@@ -50,6 +50,10 @@ export async function executeSql(request: ExecuteRequest): Promise<QueryResult> 
   return invoke<QueryResult>("execute_sql", { request });
 }
 
+export async function explainSql(request: ExecuteRequest): Promise<QueryResult> {
+  return invoke<QueryResult>("explain_sql", { request });
+}
+
 export async function getLlmConfig(): Promise<LlmConfigResponse> {
   return invoke<LlmConfigResponse>("get_llm_config");
 }

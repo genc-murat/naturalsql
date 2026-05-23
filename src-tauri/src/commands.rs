@@ -124,6 +124,11 @@ pub async fn execute_sql(request: ExecuteRequest) -> Result<query::QueryResult, 
 }
 
 #[tauri::command]
+pub async fn explain_sql(request: ExecuteRequest) -> Result<query::QueryResult, AppError> {
+    query::explain_query(&request.sql).await
+}
+
+#[tauri::command]
 pub async fn get_llm_config() -> Result<LlmConfigResponse, String> {
     let config = config::get_config().await;
     Ok(LlmConfigResponse {

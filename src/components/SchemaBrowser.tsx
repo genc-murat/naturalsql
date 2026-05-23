@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronRight, ChevronDown, Table2, Key, Hash, Type, Calendar, Database, Download, Loader2, CheckCircle } from "lucide-react";
+import { ChevronRight, ChevronDown, Table2, Key, Hash, Type, Calendar, Database, Download, Loader2, CheckCircle, Eye } from "lucide-react";
 import type { Schema } from "../types";
 
 interface SchemaBrowserProps {
@@ -10,6 +10,7 @@ interface SchemaBrowserProps {
   onSelectDatabase: (db: string) => void;
   onCacheDatabase: (db: string) => void;
   onClearCache: (db: string) => void;
+  onViewData: (database: string, table: string) => void;
   isCaching: boolean;
   cachingDatabase: string | null;
 }
@@ -28,13 +29,20 @@ function getColumnIcon(columnType: string) {
   return <Hash className="w-3.5 h-3.5 text-gray-400" />;
 }
 
-function TableNode({ table }: { table: Schema["tables"][number] }) {
+function TableNode({ table, database, onViewData }: { table: Schema["tables"][number]; database: string; onViewData: (database: string, table: string) => void }) {
   const [isExpanded, setIsExpanded] = useState(false);
+  const [showContext, setShowContext] = useState<{ x: number; y: number } | null>(null);
+
+  const handleContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setShowContext({ x: e.clientX, y: e.clientY });
+  };
 
   return (
     <div>
       <button
         onClick={() => setIsExpanded(!isExpanded)}
+        onContextMenu={handleContextMenu}
         className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-[var(--bg-tertiary)] text-left transition-colors group"
       >
         {isExpanded ? (
@@ -49,6 +57,7 @@ function TableNode({ table }: { table: Schema["tables"][number] }) {
         <span className="text-xs text-[var(--text-muted)] ml-auto">
           {table.columns.length}
         </span>
+        <Eye className="w-3 h-3 text-[var(--text-muted)] opacity-0 group-hover:opacity-100 transition-opacity ml-auto" />
       </button>
       {isExpanded && (
         <div className="ml-6 pl-3 border-l border-[var(--border)]">
@@ -73,6 +82,26 @@ function TableNode({ table }: { table: Schema["tables"][number] }) {
           ))}
         </div>
       )}
+
+      {/* Context Menu */}
+      {showContext && (
+        <div
+          className="fixed z-50 min-w-[160px] rounded-lg bg-[var(--bg-primary)] border border-[var(--border)] shadow-xl py-1"
+          style={{ top: showContext.y, left: showContext.x }}
+          onClick={() => setShowContext(null)}
+        >
+          <button
+            onClick={() => {
+              onViewData(database, table.name);
+              setShowContext(null);
+            }}
+            className="w-full px-3 py-2 text-sm text-left hover:bg-[var(--bg-secondary)] flex items-center gap-2 text-[var(--text-primary)]"
+          >
+            <Eye className="w-3.5 h-3.5 text-[var(--accent)]" />
+            View Data
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -85,6 +114,7 @@ export function SchemaBrowser({
   onSelectDatabase,
   onCacheDatabase,
   onClearCache,
+  onViewData,
   isCaching,
   cachingDatabase,
 }: SchemaBrowserProps) {
@@ -155,7 +185,7 @@ export function SchemaBrowser({
                   {schema.tables.length} table{schema.tables.length !== 1 ? "s" : ""}
                 </div>
                 {schema.tables.map((table) => (
-                  <TableNode key={table.name} table={table} />
+                  <TableNode key={table.name} table={table} database={selectedDatabase!} onViewData={onViewData} />
                 ))}
               </div>
             )}
