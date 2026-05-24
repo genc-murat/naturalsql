@@ -174,3 +174,25 @@ export interface StreamState {
   totalSoFar: number;
   error: string | null;
 }
+
+export type WidgetType = "stat" | "bar" | "line" | "area" | "pie" | "table";
+
+export interface DashboardWidget {
+  id: string;
+  type: WidgetType;
+  title: string;
+  sql: string;
+  result?: QueryResult;
+  isLoading?: boolean;
+  error?: string | null;
+  xCol?: string;
+  yCols?: string[];
+}
+
+export interface Dashboard {
+  id: string;
+  title: string;
+  description?: string;
+  widgets: DashboardWidget[];
+  createdAt: number;
+}

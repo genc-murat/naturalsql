@@ -6,8 +6,11 @@ import {
   ChevronRight,
   Code,
   Database,
+  Layout,
 } from "lucide-react";
 import { analyzeData } from "../api";
+import type { Dashboard } from "../types";
+import { DashboardGrid } from "./dashboard/DashboardGrid";
 
 interface ChatMessage {
   id: number;
@@ -15,6 +18,7 @@ interface ChatMessage {
   content: string;
   sql?: string;
   data?: { columns: string[]; rows: unknown[][]; row_count: number } | null;
+  dashboard?: Dashboard;
 }
 
 interface AnalysisChatProps {
@@ -37,6 +41,8 @@ export function AnalysisChat({ isOpen, onToggle }: AnalysisChatProps) {
     scrollToBottom();
   }, [messages, isLoading]);
 
+  const [activeDashboard, setActiveDashboard] = useState<Dashboard | null>(null);
+
   const handleSend = async () => {
     if (!input.trim() || isLoading) return;
 
@@ -58,6 +64,7 @@ export function AnalysisChat({ isOpen, onToggle }: AnalysisChatProps) {
         content: result.answer,
         sql: result.sql,
         data: result.data,
+        dashboard: result.dashboard,
       };
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (err) {
@@ -158,6 +165,17 @@ export function AnalysisChat({ isOpen, onToggle }: AnalysisChatProps) {
                   <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>
                 </div>
 
+                {/* Dashboard Button */}
+                {msg.dashboard && (
+                  <button
+                    onClick={() => setActiveDashboard(msg.dashboard!)}
+                    className="mt-2 flex items-center gap-2 px-3 py-2 rounded-md bg-[var(--accent)] text-white text-xs font-semibold hover:bg-[var(--accent-hover)] transition-colors shadow-sm"
+                  >
+                    <Layout className="w-3.5 h-3.5" />
+                    View Generated Dashboard
+                  </button>
+                )}
+
                 {/* SQL snippet */}
                 {msg.sql && (
                   <details className="mt-1 max-w-[90%] w-full">
@@ -211,6 +229,14 @@ export function AnalysisChat({ isOpen, onToggle }: AnalysisChatProps) {
             )}
             <div ref={messagesEndRef} />
           </div>
+
+          {/* Active Dashboard Modal */}
+          {activeDashboard && (
+            <DashboardGrid
+              dashboard={activeDashboard}
+              onClose={() => setActiveDashboard(null)}
+            />
+          )}
 
           {/* Input */}
           <div className="px-3 py-3 border-t border-[var(--border)] bg-[var(--bg-secondary)]">

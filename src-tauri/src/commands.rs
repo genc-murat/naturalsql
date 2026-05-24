@@ -609,11 +609,29 @@ pub struct AnalyzeDataRequest {
     pub question: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DashboardWidget {
+    pub id: String,
+    pub r#type: String, // "stat", "bar", "line", "area", "pie", "table"
+    pub title: String,
+    pub sql: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Dashboard {
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub widgets: Vec<DashboardWidget>,
+    pub created_at: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AnalyzeDataResponse {
     pub sql: String,
     pub answer: String,
     pub data: Option<query::QueryResult>,
+    pub dashboard: Option<Dashboard>,
 }
 
 #[tauri::command]
@@ -727,10 +745,52 @@ pub async fn analyze_data(request: AnalyzeDataRequest) -> Result<AnalyzeDataResp
         "Query executed successfully.".to_string()
     };
 
+    // Step 4: Check if a dashboard was requested and generate it
+    let mut dashboard = None;
+    let q_lower = request.question.to_lowercase();
+    if q_lower.contains("dashboard") || q_lower.contains("visualize") || q_lower.contains("chart") {
+        let dashboard_prompt = format!(
+            "You are a dashboard architect. Given the database schema and the user's request, \
+             design a dashboard with 3-5 widgets. Each widget needs a title, a type, and a SQL query.\n\
+             Types: stat, bar, line, area, pie, table.\n\
+             Return ONLY a JSON object with this structure:\n\
+             {{\"title\": \"...\", \"description\": \"...\", \"widgets\": [{{\"id\": \"1\", \"type\": \"...\", \"title\": \"...\", \"sql\": \"...\"}}]}}\n\n\
+             {}\n\n\
+             Request: {}\n\n\
+             JSON:",
+            schema_context, request.question
+        );
+
+        let dash_response = reqwest::Client::new()
+            .post(&format!("{}/api/generate", url.trim_end_matches('/')))
+            .json(&serde_json::json!({
+                "model": model,
+                "prompt": dashboard_prompt,
+                "format": "json",
+                "stream": false,
+            }))
+            .send()
+            .await?;
+
+        if dash_response.status().is_success() {
+            if let Ok(b) = dash_response.json::<OllamaResp>().await {
+                if let Ok(mut d) = serde_json::from_str::<Dashboard>(&b.response) {
+                    d.id = uuid::Uuid::new_v4().to_string();
+                    d.created_at = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    dashboard = Some(d);
+                }
+            }
+        }
+    }
+
     Ok(AnalyzeDataResponse {
         sql,
         answer,
         data,
+        dashboard,
     })
 }
 

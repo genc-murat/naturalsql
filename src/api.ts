@@ -91,8 +91,8 @@ export async function validateCrossDbJoin(request: { left_table: string; right_t
   }>("validate_cross_db_join", { request });
 }
 
-export async function analyzeData(request: { question: string }): Promise<{ sql: string; answer: string; data: { columns: string[]; rows: unknown[][]; row_count: number } | null }> {
-  return invoke<{ sql: string; answer: string; data: { columns: string[]; rows: unknown[][]; row_count: number } | null }>("analyze_data", { request });
+export async function analyzeData(request: { question: string }): Promise<{ sql: string; answer: string; data: { columns: string[]; rows: unknown[][]; row_count: number } | null; dashboard?: Dashboard }> {
+  return invoke<{ sql: string; answer: string; data: { columns: string[]; rows: unknown[][]; row_count: number } | null; dashboard?: Dashboard }>("analyze_data", { request });
 }
 
 export async function resultSetAction(request: { question: string; columns: string[]; sample_rows: unknown[][]; total_rows: number }): Promise<{ response: string; suggested_sql: string | null }> {

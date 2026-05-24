@@ -190,7 +190,7 @@ pub async fn natural_language_to_sql_with_tools(
         // IMPORTANT: No angle-bracket placeholders like <table_name> — LLMs copy them verbatim.
         // Use ALL_CAPS descriptive labels instead.
         let tools_description = format!(
-            "You have access to tools. Use them by outputting a JSON object:\n\
+            "You have access to tools. Use them by outputting a SINGLE JSON object. Do NOT add reasoning before or after the JSON.\n\
              Core (for writing SQL):\n\
              - list_tables(database) — list tables in a database\n\
              - get_table_schema(database, table) — get column definitions for a table\n\
@@ -257,12 +257,12 @@ pub async fn natural_language_to_sql_with_tools(
               1. NEVER invent table names, column names, or data values. ONLY use names returned by tools.\n\
               2. ALWAYS call get_table_schema BEFORE writing any SQL query. NEVER guess column names.\n\
               3. Use ONLY column names exactly as shown in schema results. Case-sensitive.\n\
-              4. If unsure about a table or column, call the tool (get_table_schema etc.). Do NOT emit any prose explaining your thought process or what you need to check.\n\
+              4. If unsure about a table or column, call a SINGLE tool. Do NOT emit any prose explaining your thought process.\n\
               5. When you have enough information, write ONLY the SQL query. No explanations, no markdown, no backticks.\n\
               6. Always use fully qualified table names: database.table\n\
               7. IMPORTANT: If you need a tool, output ONLY the JSON. If you're ready, output ONLY the SQL.\n\
-              8. Do NOT repeat the same tool call — use the results below to decide your next step.\n\
-              9. If a tool returns an error, try a different approach or ask the user for clarification.\n\n\
+              8. Do NOT repeat the same tool call.\n\
+              9. If a tool returns an error, try a different approach.\n\n\
               {conversation}\n\n\
               User's question: {natural_language}",
         );
@@ -972,9 +972,38 @@ async fn process_tool_call(
         _ => tool_name,
     };
 
+    let (params_map, tool_name) = if tool_call.get("args").is_some() && tool_call.get("function_name").is_some() {
+        // Nested format handler: {"function_name": "get_table_schema", "args": {"database": "...", "table": "..."}}
+        let name = tool_call.get("function_name").and_then(|v| v.as_str()).unwrap_or(tool_name);
+        let mut params = HashMap::new();
+        if let Some(args) = tool_call.get("args").and_then(|v| v.as_object()) {
+            for (k, v) in args {
+                params.insert(k.clone(), match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Null => "NULL".to_string(),
+                    other => other.to_string(),
+                });
+            }
+        }
+        (params, name)
+    } else {
+        let mut params = HashMap::new();
+        if let Some(obj) = tool_call.as_object() {
+            for (k, v) in obj {
+                if k == "tool" { continue; }
+                params.insert(k.clone(), match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Null => "NULL".to_string(),
+                    other => other.to_string(),
+                });
+            }
+        }
+        (params, tool_name)
+    };
+
     match tool_name {
         "list_tables" => {
-            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let database = params_map.get("database").map(|s| s.as_str()).unwrap_or("");
             if let Some(schema) = all_schemas.iter().find(|s| s.database == database) {
                 let tables: Vec<&str> = schema.tables.iter().map(|t| t.name.as_str()).collect();
                 let result = format!("Tables in '{}': {}", database, tables.join(", "));
@@ -985,8 +1014,8 @@ async fn process_tool_call(
             }
         }
         "get_table_schema" => {
-            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
-            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            let database = params_map.get("database").map(|s| s.as_str()).unwrap_or("");
+            let table = params_map.get("table").map(|s| s.as_str()).unwrap_or("");
             if let Some(schema) = all_schemas.iter().find(|s| s.database == database) {
                 if let Some(tbl) = schema.tables.iter().find(|t| t.name == table) {
                     let cols: Vec<String> = tbl.columns.iter().map(|c| {
@@ -1004,8 +1033,8 @@ async fn process_tool_call(
             }
         }
         "get_sample_data" => {
-            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
-            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            let database = params_map.get("database").map(|s| s.as_str()).unwrap_or("");
+            let table = params_map.get("table").map(|s| s.as_str()).unwrap_or("");
 
             // Actually query the database for sample data
             match crate::db::connection::get_pool().await {
@@ -1063,9 +1092,9 @@ async fn process_tool_call(
             }
         }
         "cross_db_join" => {
-            let left_table = tool_call.get("left_table").and_then(|v| v.as_str()).unwrap_or("");
-            let right_table = tool_call.get("right_table").and_then(|v| v.as_str()).unwrap_or("");
-            let join_type = tool_call.get("join_type").and_then(|v| v.as_str()).unwrap_or("INNER JOIN");
+            let left_table = params_map.get("left_table").map(|s| s.as_str()).unwrap_or("");
+            let right_table = params_map.get("right_table").map(|s| s.as_str()).unwrap_or("");
+            let join_type = params_map.get("join_type").map(|s| s.as_str()).unwrap_or("INNER JOIN");
 
             // Parse database.table format
             let left_parts: Vec<&str> = left_table.splitn(2, '.').collect();
