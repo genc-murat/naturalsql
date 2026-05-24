@@ -8,6 +8,7 @@ import { ResultVisualization } from "./components/ResultVisualization";
 import { AnalysisChat } from "./components/AnalysisChat";
 import { LlmConfigPanel } from "./components/LlmConfigPanel";
 import { TableStructure } from "./components/TableStructure";
+import { ErDiagram } from "./components/ErDiagram";
 import { QueryTabs } from "./components/QueryTabs";
 import {
   listDatabases,
@@ -56,6 +57,8 @@ function App() {
   const [isSidebarDragging, setIsSidebarDragging] = useState(false);
   const [isEditorCollapsed, setIsEditorCollapsed] = useState(false);
   const [tableStructureTarget, setTableStructureTarget] = useState<{ database: string; table: string } | null>(null);
+  const [showErDiagram, setShowErDiagram] = useState(false);
+  const [erDiagramDatabase, setErDiagramDatabase] = useState<string>("");
 
   const [tabs, setTabs] = useState<QueryTab[]>(() => {
     const saved = localStorage.getItem("naturalsql-session");
@@ -373,6 +376,10 @@ function App() {
                   onClearCache={handleClearCache}
                   onViewData={handleViewData}
                   onViewStructure={(db, tbl) => setTableStructureTarget({ database: db, table: tbl })}
+                  onShowErDiagram={(db) => {
+                    setErDiagramDatabase(db);
+                    setShowErDiagram(true);
+                  }}
                   isCaching={isCaching}
                   cachingDatabase={cachingDatabase}
                 />
@@ -502,6 +509,13 @@ function App() {
           table={tableStructureTarget.table}
         />
       )}
+
+      <ErDiagram
+        isOpen={showErDiagram}
+        onClose={() => setShowErDiagram(false)}
+        database={erDiagramDatabase}
+        onViewData={handleViewData}
+      />
     </div>
   );
 }

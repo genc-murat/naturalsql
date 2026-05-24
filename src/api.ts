@@ -12,6 +12,8 @@ import type {
   TableStructure,
   SchemaMigrationResponse,
   DataEditResponse,
+  Dashboard,
+  ErDiagramResponse,
 } from "./types";
 import { listen } from "@tauri-apps/api/event";
 
@@ -137,6 +139,10 @@ export async function nlDataEdit(naturalLanguage: string, database: string): Pro
 
 export async function executeSqlStreaming(sql: string, queryId: string): Promise<void> {
   return invoke<void>("execute_sql_streaming", { request: { sql, query_id: queryId } });
+}
+
+export async function getErDiagramData(database: string): Promise<ErDiagramResponse> {
+  return invoke<ErDiagramResponse>("get_er_diagram_data", { request: { database } });
 }
 
 export async function cancelRunningQuery(queryId: string): Promise<boolean> {

@@ -1313,3 +1313,138 @@ pub async fn execute_sql_streaming(
 pub async fn cancel_running_query(query_id: String) -> Result<bool, String> {
     Ok(query::cancel_query(&query_id))
 }
+
+// ========================
+// ER Diagram Data
+// ========================
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ErColumnNode {
+    pub name: String,
+    pub column_type: String,
+    pub is_primary_key: bool,
+    pub is_foreign_key: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ErTableNode {
+    pub database: String,
+    pub table: String,
+    pub columns: Vec<ErColumnNode>,
+    pub row_count: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ErRelation {
+    pub constraint_name: Option<String>,
+    pub from_database: String,
+    pub from_table: String,
+    pub from_column: String,
+    pub to_database: String,
+    pub to_table: String,
+    pub to_column: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ErDiagramResponse {
+    pub tables: Vec<ErTableNode>,
+    pub relations: Vec<ErRelation>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ErDiagramRequest {
+    pub database: String,
+}
+
+#[tauri::command]
+pub async fn get_er_diagram_data(
+    request: ErDiagramRequest,
+) -> Result<ErDiagramResponse, AppError> {
+    if request.database.trim().is_empty() {
+        return Err(AppError::QueryExecution("Database name is required.".to_string()));
+    }
+
+    // Load cached schema for table/column info
+    let cached = schema::load_cached_schema(&request.database)?;
+    let schema = cached.ok_or_else(|| AppError::QueryExecution(
+        format!("Database '{}' is not cached. Please cache it first.", request.database)
+    ))?;
+
+    // Get all foreign keys from the database
+    let fk_relations = schema::introspect_foreign_keys(&request.database).await?;
+
+    // Build a set of FK columns for quick lookup
+    let mut fk_columns = std::collections::HashSet::new();
+    for rel in &fk_relations {
+        fk_columns.insert((rel.from_table.clone(), rel.from_column.clone()));
+    }
+
+    // Build table nodes with column info
+    let mut tables = Vec::new();
+    for table in &schema.tables {
+        let columns: Vec<ErColumnNode> = table.columns.iter().map(|col| {
+            ErColumnNode {
+                name: col.name.clone(),
+                column_type: col.column_type.clone(),
+                is_primary_key: col.column_key == "PRI",
+                is_foreign_key: fk_columns.contains(&(table.name.clone(), col.name.clone())),
+            }
+        }).collect();
+
+        // Get approximate row count
+        let row_count = schema::get_table_row_count(&request.database, &table.name).await.unwrap_or(0);
+
+        tables.push(ErTableNode {
+            database: request.database.clone(),
+            table: table.name.clone(),
+            columns,
+            row_count,
+        });
+    }
+
+    // Also include referenced tables from other databases (cross-db FK references)
+    let mut seen_tables: std::collections::HashSet<String> = tables.iter().map(|t| t.table.clone()).collect();
+    let mut extra_tables: Vec<ErTableNode> = Vec::new();
+
+    for rel in &fk_relations {
+        if rel.to_database != request.database && !seen_tables.contains(&rel.to_table) {
+            if let Ok(Some(other_schema)) = schema::load_cached_schema(&rel.to_database) {
+                if let Some(ref_table) = other_schema.tables.iter().find(|t| t.name == rel.to_table) {
+                    let columns: Vec<ErColumnNode> = ref_table.columns.iter().map(|col| ErColumnNode {
+                        name: col.name.clone(),
+                        column_type: col.column_type.clone(),
+                        is_primary_key: col.column_key == "PRI",
+                        is_foreign_key: false,
+                    }).collect();
+
+                    let row_count = schema::get_table_row_count(&rel.to_database, &ref_table.name).await.unwrap_or(0);
+
+                    extra_tables.push(ErTableNode {
+                        database: rel.to_database.clone(),
+                        table: ref_table.name.clone(),
+                        columns,
+                        row_count,
+                    });
+                    seen_tables.insert(ref_table.name.clone());
+                }
+            }
+        }
+    }
+
+    tables.extend(extra_tables);
+
+    // Convert FK relations
+    let relations: Vec<ErRelation> = fk_relations.into_iter().map(|rel| {
+        ErRelation {
+            constraint_name: rel.constraint_name,
+            from_database: rel.from_database,
+            from_table: rel.from_table,
+            from_column: rel.from_column,
+            to_database: rel.to_database,
+            to_table: rel.to_table,
+            to_column: rel.to_column,
+        }
+    }).collect();
+
+    Ok(ErDiagramResponse { tables, relations })
+}

@@ -175,6 +175,36 @@ export interface StreamState {
   error: string | null;
 }
 
+// ER Diagram types
+export interface ErColumnNode {
+  name: string;
+  column_type: string;
+  is_primary_key: boolean;
+  is_foreign_key: boolean;
+}
+
+export interface ErTableNode {
+  database: string;
+  table: string;
+  columns: ErColumnNode[];
+  row_count: number;
+}
+
+export interface ErRelation {
+  constraint_name: string | null;
+  from_database: string;
+  from_table: string;
+  from_column: string;
+  to_database: string;
+  to_table: string;
+  to_column: string;
+}
+
+export interface ErDiagramResponse {
+  tables: ErTableNode[];
+  relations: ErRelation[];
+}
+
 export type WidgetType = "stat" | "bar" | "line" | "area" | "pie" | "table";
 
 export interface DashboardWidget {
