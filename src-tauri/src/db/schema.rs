@@ -854,7 +854,8 @@ pub async fn get_server_info() -> Result<ServerInfo, AppError> {
 
     let version: String = conn.query_first("SELECT VERSION()").await?.unwrap_or_default();
     let current_user: String = conn.query_first("SELECT CURRENT_USER()").await?.unwrap_or_default();
-    let current_database: String = conn.query_first("SELECT DATABASE()").await?.unwrap_or_default();
+    let current_database: Option<Option<String>> = conn.query_first("SELECT DATABASE()").await?;
+    let current_database = current_database.flatten().unwrap_or_default();
     let character_set: String = conn.query_first("SELECT @@character_set_server").await?.unwrap_or_default();
     let collation: String = conn.query_first("SELECT @@collation_server").await?.unwrap_or_default();
     let timezone: String = conn.query_first("SELECT @@system_time_zone").await?.unwrap_or_default();

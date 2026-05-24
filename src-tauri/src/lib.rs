@@ -41,6 +41,7 @@ pub fn run() {
             execute_sql_streaming,
             cancel_running_query,
             get_er_diagram_data,
+            schema_advisor,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

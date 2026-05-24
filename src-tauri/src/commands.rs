@@ -1448,3 +1448,274 @@ pub async fn get_er_diagram_data(
 
     Ok(ErDiagramResponse { tables, relations })
 }
+
+// ========================
+// Schema Advisor
+// ========================
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AdvisorIssue {
+    pub severity: String,
+    pub category: String,
+    pub title: String,
+    pub description: String,
+    pub suggestion: String,
+    pub table: Option<String>,
+    pub column: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AdvisorResponse {
+    pub summary: String,
+    pub issues: Vec<AdvisorIssue>,
+    pub db_size_mb: f64,
+    pub total_tables: usize,
+    pub total_issues: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AdvisorRequest {
+    pub database: String,
+}
+
+#[tauri::command]
+pub async fn schema_advisor(
+    request: AdvisorRequest,
+) -> Result<AdvisorResponse, AppError> {
+    if request.database.trim().is_empty() {
+        return Err(AppError::QueryExecution("Database name is required.".to_string()));
+    }
+
+    // Load cached schema
+    let cached = schema::load_cached_schema(&request.database)?;
+    let _schema = cached.ok_or_else(|| AppError::QueryExecution(
+        format!("Database '{}' is not cached. Please cache it first.", request.database)
+    ))?;
+
+    // Collect database-level stats
+    let db_size = schema::get_database_size(&request.database).await.unwrap_or(schema::DatabaseSize {
+        total_size_mb: 0.0,
+        data_size_mb: 0.0,
+        index_size_mb: 0.0,
+        table_count: 0,
+        total_rows: 0,
+    });
+
+    let size_ranking = schema::get_table_size_ranking(&request.database).await.unwrap_or_default();
+    let server_info = schema::get_server_info().await.ok();
+    let data_type_summary = schema::get_data_type_summary(&request.database).await.unwrap_or_default();
+
+    let total_tables = db_size.table_count as usize;
+
+    // Build a comprehensive data summary for the LLM
+    let mut data_report = String::new();
+
+    data_report.push_str(&format!("## Database Overview\n"));
+    data_report.push_str(&format!("- Database: {}\n", request.database));
+    data_report.push_str(&format!("- Total size: {:.2} MB (data: {:.2} MB, indexes: {:.2} MB)\n",
+        db_size.total_size_mb, db_size.data_size_mb, db_size.index_size_mb));
+    data_report.push_str(&format!("- Tables: {}\n", db_size.table_count));
+    data_report.push_str(&format!("- Total rows: {}\n\n", db_size.total_rows));
+
+    if let Some(ref info) = server_info {
+        data_report.push_str(&format!("- MySQL version: {}\n", info.version));
+        data_report.push_str(&format!("- Collation: {}\n\n", info.collation));
+    }
+
+    // Table size ranking
+    if !size_ranking.is_empty() {
+        data_report.push_str("## Table Size Ranking\n");
+        data_report.push_str("| Table | Rows | Data (MB) | Indexes (MB) | Total (MB) |\n");
+        data_report.push_str("|-------|------|-----------|-------------|------------|\n");
+        for entry in &size_ranking {
+            data_report.push_str(&format!("| {} | {} | {:.2} | {:.2} | {:.2} |\n",
+                entry.table, entry.rows, entry.data_size_mb, entry.index_size_mb, entry.total_size_mb));
+        }
+        data_report.push('\n');
+    }
+
+    // Data type distribution
+    if !data_type_summary.is_empty() {
+        data_report.push_str("## Data Type Distribution\n");
+        for dt in &data_type_summary {
+            data_report.push_str(&format!("- {}: {} columns (in {})\n",
+                dt.data_type, dt.column_count, dt.tables.join(", ")));
+        }
+        data_report.push('\n');
+    }
+
+    // Per-table analysis
+    data_report.push_str("## Per-Table Analysis\n\n");
+    for entry in &size_ranking {
+        let table = &entry.table;
+
+        // Table stats
+        data_report.push_str(&format!("### {}\n", table));
+        data_report.push_str(&format!("- Rows: {} | Size: {:.2} MB | Index: {:.2} MB\n",
+            entry.rows, entry.data_size_mb, entry.index_size_mb));
+
+        // Index suggestions
+        if let Ok(suggestions) = schema::suggest_indexes(&request.database, table).await {
+            if !suggestions.is_empty() {
+                data_report.push_str(&format!("- Index suggestions: {} issue(s)\n", suggestions.len()));
+                for s in &suggestions {
+                    data_report.push_str(&format!("  - [{}] {}: {}\n", s.priority, s.column, s.reason));
+                }
+            }
+        }
+
+        // Table health
+        if let Ok(health) = schema::analyze_table_health(&request.database, table).await {
+            if health.fragmentation_percent > 10.0 {
+                data_report.push_str(&format!("- Fragmentation: {:.1}% - consider OPTIMIZE TABLE\n", health.fragmentation_percent));
+            }
+        }
+
+        // NULL counts
+        if let Ok(nulls) = schema::count_nulls_per_column(&request.database, table).await {
+            let high_null_cols: Vec<_> = nulls.iter()
+                .filter(|n| n.total_count > 0 && (n.null_count as f64 / n.total_count as f64) > 0.5)
+                .collect();
+            if !high_null_cols.is_empty() {
+                data_report.push_str(&format!("- High NULL columns (>50%):\n"));
+                for n in &high_null_cols {
+                    data_report.push_str(&format!("  - {}.{}: {} NULL out of {} ({:.0}%)\n",
+                        table, n.column, n.null_count, n.total_count,
+                        n.null_count as f64 / n.total_count as f64 * 100.0));
+                }
+            }
+        }
+
+        // Foreign keys
+        if let Ok(fks) = schema::get_table_foreign_keys(&request.database, table).await {
+            if !fks.is_empty() {
+                data_report.push_str(&format!("- Foreign keys: {} relation(s)\n", fks.len()));
+                for fk in &fks {
+                    data_report.push_str(&format!("  - {}.{} -> {}.{}\n",
+                        table, fk.from_column, fk.to_table, fk.to_column));
+                }
+            } else if entry.rows > 1000 {
+                // Check for potential FK columns that lack actual FK constraints
+                if let Ok(cached) = schema::load_cached_schema(&request.database) {
+                    if let Some(s) = cached {
+                        if let Some(tbl) = s.tables.iter().find(|t| t.name == *table) {
+                            let id_cols: Vec<_> = tbl.columns.iter()
+                                .filter(|c| c.name.ends_with("_id") || c.name.ends_with("Id"))
+                                .collect();
+                            if !id_cols.is_empty() {
+                                data_report.push_str(&format!("- Potential FK columns without constraints: {}\n",
+                                    id_cols.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Primary key check
+        if let Ok(pks) = schema::get_primary_key_columns(&request.database, table).await {
+            if pks.is_empty() {
+                data_report.push_str("- ⚠️ No primary key defined\n");
+            }
+        }
+
+        data_report.push('\n');
+    }
+
+    // Orphan records check (top tables only)
+    data_report.push_str("## Referential Integrity\n\n");
+    let fk_relations = schema::introspect_foreign_keys(&request.database).await.unwrap_or_default();
+    for rel in fk_relations.iter().take(20) {
+        if let Ok(orphan_count) = schema::find_orphan_records(
+            &request.database, &rel.from_table, &rel.from_column,
+            &rel.to_database, &rel.to_table, &rel.to_column,
+        ).await {
+            if orphan_count > 0 {
+                data_report.push_str(&format!("- {} orphan records in {}.{} (referencing {}.{})\n",
+                    orphan_count, rel.from_table, rel.from_column, rel.to_table, rel.to_column));
+            }
+        }
+    }
+    data_report.push('\n');
+
+    // Now call LLM to analyze all this data
+    let url = config::get_llm_url().await;
+    let model = config::get_llm_model().await;
+
+    let prompt = format!(
+        "You are a MySQL database expert and performance advisor. Analyze the following database report and provide \
+         actionable optimization suggestions.\n\n\
+         Focus on these categories:\n\
+         1. **INDEX** - Missing indexes, duplicate indexes, or inefficient index usage\n\
+         2. **PERFORMANCE** - Slow queries, table scans, fragmentation\n\
+         3. **NORMALIZATION** - Missing FK constraints, denormalized structures\n\
+         4. **DATA_QUALITY** - High NULL ratios, orphan records, data type issues\n\
+         5. **SCHEMA_DESIGN** - Missing PKs, engine choices, partitioning needs\n\
+         6. **SECURITY** - Data type concerns, charset/collation mismatches\n\
+         7. **STORAGE** - Large tables, bloated indexes, fragmentation\n\
+         \
+         For EACH issue found, output a JSON object with these fields:\
+         - severity: \"critical\" (must fix now), \"warning\" (should fix soon), \"info\" (nice to have)\n\
+         - category: one of the categories above\n\
+         - title: short, clear title\n\
+         - description: specific finding with numbers where applicable\n\
+         - suggestion: actionable fix\n\
+         - table: table name if applicable, null otherwise\n\
+         - column: column name if applicable, null otherwise\n\
+         \
+         Wrap ALL issues in a JSON array with this structure:\n\
+         {{\"summary\": \"One-line executive summary of database health\", \"issues\": [...]}}\n\
+         Return ONLY valid JSON. No markdown, no code blocks, no extra text.\n\n\
+         Database Report:\n\
+         {}",
+        data_report
+    );
+
+    let response = reqwest::Client::new()
+        .post(&format!("{}/api/generate", url.trim_end_matches('/')))
+        .json(&serde_json::json!({
+            "model": model,
+            "prompt": prompt,
+            "format": "json",
+            "stream": false,
+        }))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(AppError::QueryExecution(
+            format!("Ollama returned status: {}", response.status())
+        ));
+    }
+
+    #[derive(Deserialize)]
+    struct LlmAdvisorOutput {
+        summary: Option<String>,
+        issues: Option<Vec<AdvisorIssue>>,
+    }
+
+    let raw_text = response.text().await?;
+    let parsed: LlmAdvisorOutput = serde_json::from_str(&raw_text)
+        .or_else(|_| {
+            // Try to extract JSON from response field
+            #[derive(Deserialize)]
+            struct OllamaResp { response: String }
+            serde_json::from_str::<OllamaResp>(&raw_text)
+                .ok()
+                .and_then(|o| serde_json::from_str::<LlmAdvisorOutput>(&o.response).ok())
+                .ok_or_else(|| AppError::InvalidLlmResponse)
+        })?;
+
+    let summary = parsed.summary.unwrap_or_else(|| format!("Analysis complete for '{}'", request.database));
+    let issues = parsed.issues.unwrap_or_default();
+    let total_issues = issues.len();
+
+    Ok(AdvisorResponse {
+        summary,
+        issues,
+        db_size_mb: db_size.total_size_mb,
+        total_tables,
+        total_issues,
+    })
+}
+

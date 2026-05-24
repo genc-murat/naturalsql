@@ -14,6 +14,7 @@ import type {
   DataEditResponse,
   Dashboard,
   ErDiagramResponse,
+  AdvisorResponse,
 } from "./types";
 import { listen } from "@tauri-apps/api/event";
 
@@ -143,6 +144,10 @@ export async function executeSqlStreaming(sql: string, queryId: string): Promise
 
 export async function getErDiagramData(database: string): Promise<ErDiagramResponse> {
   return invoke<ErDiagramResponse>("get_er_diagram_data", { request: { database } });
+}
+
+export async function schemaAdvisor(database: string): Promise<AdvisorResponse> {
+  return invoke<AdvisorResponse>("schema_advisor", { request: { database } });
 }
 
 export async function cancelRunningQuery(queryId: string): Promise<boolean> {

@@ -205,6 +205,25 @@ export interface ErDiagramResponse {
   relations: ErRelation[];
 }
 
+// Schema Advisor types
+export interface AdvisorIssue {
+  severity: "critical" | "warning" | "info";
+  category: string;
+  title: string;
+  description: string;
+  suggestion: string;
+  table: string | null;
+  column: string | null;
+}
+
+export interface AdvisorResponse {
+  summary: string;
+  issues: AdvisorIssue[];
+  db_size_mb: number;
+  total_tables: number;
+  total_issues: number;
+}
+
 export type WidgetType = "stat" | "bar" | "line" | "area" | "pie" | "table";
 
 export interface DashboardWidget {

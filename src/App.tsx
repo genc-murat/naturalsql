@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Database, ExternalLink, Settings, CheckCircle, Plug } from "lucide-react";
+import { Database, ExternalLink, Settings, CheckCircle, Plug, Search } from "lucide-react";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { ConnectionModal } from "./components/ConnectionModal";
 import { SchemaBrowser } from "./components/SchemaBrowser";
@@ -9,6 +9,7 @@ import { AnalysisChat } from "./components/AnalysisChat";
 import { LlmConfigPanel } from "./components/LlmConfigPanel";
 import { TableStructure } from "./components/TableStructure";
 import { ErDiagram } from "./components/ErDiagram";
+import { SchemaAdvisor } from "./components/SchemaAdvisor";
 import { QueryTabs } from "./components/QueryTabs";
 import {
   listDatabases,
@@ -59,6 +60,7 @@ function App() {
   const [tableStructureTarget, setTableStructureTarget] = useState<{ database: string; table: string } | null>(null);
   const [showErDiagram, setShowErDiagram] = useState(false);
   const [erDiagramDatabase, setErDiagramDatabase] = useState<string>("");
+  const [showSchemaAdvisor, setShowSchemaAdvisor] = useState(false);
 
   const [tabs, setTabs] = useState<QueryTab[]>(() => {
     const saved = localStorage.getItem("naturalsql-session");
@@ -341,6 +343,13 @@ function App() {
             onToggle={() => setShowAnalysisChat(!showAnalysisChat)}
           />
           <button
+            onClick={() => setShowSchemaAdvisor(true)}
+            className="p-2 rounded-md transition-colors hover:bg-[var(--bg-tertiary)]"
+            title="Schema Advisor"
+          >
+            <Search className="w-4 h-4 text-[var(--text-muted)]" />
+          </button>
+          <button
             onClick={() => setShowLlmConfig(true)}
             className="p-2 rounded-md transition-colors hover:bg-[var(--bg-tertiary)]"
             title="LLM Settings"
@@ -515,6 +524,13 @@ function App() {
         onClose={() => setShowErDiagram(false)}
         database={erDiagramDatabase}
         onViewData={handleViewData}
+      />
+
+      <SchemaAdvisor
+        isOpen={showSchemaAdvisor}
+        onClose={() => setShowSchemaAdvisor(false)}
+        database={selectedDatabase || ""}
+        cachedDatabases={cachedDatabases}
       />
     </div>
   );
