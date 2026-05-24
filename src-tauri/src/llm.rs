@@ -175,10 +175,32 @@ pub async fn natural_language_to_sql_with_tools(
              - get_table_stats(database, table) — row count, data size, index size\n\
              - get_table_status(database, table) — engine, row format, collation\n\
              - analyze_table_health(database, table) — fragmentation and health check\n\
+             Key & Constraint Discovery:\n\
+             - get_primary_key(database, table) — primary key columns\n\
+             - get_unique_keys(database, table) — unique key columns\n\
+             - get_enum_values(database, table, column) — ENUM/SET possible values\n\
+             - get_auto_increment(database, table) — current auto_increment value\n\
+             - get_referenced_by(database, table) — tables that reference this table (reverse FK)\n\
              Cross-Database Discovery:\n\
              - find_relationships(from_database, to_database) — FK relations between databases\n\
              - find_similar_columns(column_pattern) — find columns matching a name pattern\n\
              - compare_tables(left, right) — compare structure of two tables\n\
+             Data Analysis:\n\
+             - count_nulls(database, table) — NULL count per column\n\
+             - get_column_stats(database, table) — min/max/avg/distinct stats per column\n\
+             - get_database_size(database) — total database size in MB\n\
+             - get_table_size_ranking(database) — tables ranked by size\n\
+             - find_orphan_records(database, table, column, ref_database, ref_table, ref_column) — find orphan records\n\
+             Performance & Monitoring:\n\
+             - get_active_connections — current MySQL connections\n\
+             - get_slow_queries(limit) — slowest queries from performance_schema\n\
+             - get_table_partitions(database, table) — partition info\n\
+             - suggest_indexes(database, table) — index suggestions based on column patterns\n\
+             Advanced Schema:\n\
+             - get_column_charset(database, table) — charset/collation per column\n\
+             - get_data_type_summary(database) — data type distribution across database\n\
+             - get_table_aliases — find similarly named tables across databases\n\
+             - get_create_options(database, table) — table CREATE OPTIONS (engine, pack_keys, etc.)\n\
              Server Info & Variables:\n\
              - get_server_info — MySQL version, user, charset\n\
              - get_variable(name) — server variable value\n\
@@ -337,6 +359,24 @@ pub async fn natural_language_to_sql_with_tools(
                     "get_variable" | "server_variable" => "get_variable",
                     "get_privileges" | "user_privileges" => "get_user_privileges",
                     "analyze_health" | "table_health" => "analyze_table_health",
+                    "pk" | "primary_key" => "get_primary_key",
+                    "unique" | "unique_keys" => "get_unique_keys",
+                    "enums" | "enum_values" | "set_values" => "get_enum_values",
+                    "auto_inc" => "get_auto_increment",
+                    "referenced_by" | "who_references" => "get_referenced_by",
+                    "null_count" => "count_nulls",
+                    "column_stats" | "stats" => "get_column_stats",
+                    "db_size" | "database_size" => "get_database_size",
+                    "size_ranking" | "table_sizes" => "get_table_size_ranking",
+                    "connections" | "processlist" | "active_connections" => "get_active_connections",
+                    "slow_query_log" => "get_slow_queries",
+                    "partitions" => "get_table_partitions",
+                    "charset" | "collation_info" => "get_column_charset",
+                    "data_types" | "type_summary" => "get_data_type_summary",
+                    "orphans" | "orphan_records" => "find_orphan_records",
+                    "similar_tables" | "aliases" | "table_aliases" => "get_table_aliases",
+                    "suggest_index" | "index_suggestions" => "suggest_indexes",
+                    "create_options" | "table_options" => "get_create_options",
                     _ => raw_tool_name,
                 };
 
@@ -492,6 +532,24 @@ pub async fn natural_language_to_sql_with_tools(
                             "get_variable" | "server_variable" => "get_variable",
                             "get_privileges" | "user_privileges" => "get_user_privileges",
                             "analyze_health" | "table_health" => "analyze_table_health",
+                            "pk" | "primary_key" => "get_primary_key",
+                            "unique" | "unique_keys" => "get_unique_keys",
+                            "enums" | "enum_values" | "set_values" => "get_enum_values",
+                            "auto_inc" => "get_auto_increment",
+                            "referenced_by" | "who_references" => "get_referenced_by",
+                            "null_count" => "count_nulls",
+                            "column_stats" | "stats" => "get_column_stats",
+                            "db_size" | "database_size" => "get_database_size",
+                            "size_ranking" | "table_sizes" => "get_table_size_ranking",
+                            "connections" | "processlist" | "active_connections" => "get_active_connections",
+                            "slow_query_log" => "get_slow_queries",
+                            "partitions" => "get_table_partitions",
+                            "charset" | "collation_info" => "get_column_charset",
+                            "data_types" | "type_summary" => "get_data_type_summary",
+                            "orphans" | "orphan_records" => "find_orphan_records",
+                            "similar_tables" | "aliases" | "table_aliases" => "get_table_aliases",
+                            "suggest_index" | "index_suggestions" => "suggest_indexes",
+                            "create_options" | "table_options" => "get_create_options",
                             _ => raw_tool_name,
                         };
 
@@ -757,6 +815,24 @@ async fn process_tool_call(
         "get_variable" | "server_variable" => "get_variable",
         "get_privileges" | "user_privileges" => "get_user_privileges",
         "analyze_health" | "table_health" => "analyze_table_health",
+        "pk" | "primary_key" => "get_primary_key",
+        "unique" | "unique_keys" => "get_unique_keys",
+        "enums" | "enum_values" | "set_values" => "get_enum_values",
+        "auto_inc" => "get_auto_increment",
+        "referenced_by" | "who_references" => "get_referenced_by",
+        "null_count" => "count_nulls",
+        "column_stats" | "stats" => "get_column_stats",
+        "db_size" | "database_size" => "get_database_size",
+        "size_ranking" | "table_sizes" => "get_table_size_ranking",
+        "connections" | "processlist" | "active_connections" => "get_active_connections",
+        "slow_query_log" => "get_slow_queries",
+        "partitions" => "get_table_partitions",
+        "charset" | "collation_info" => "get_column_charset",
+        "data_types" | "type_summary" => "get_data_type_summary",
+        "orphans" | "orphan_records" => "find_orphan_records",
+        "similar_tables" | "aliases" | "table_aliases" => "get_table_aliases",
+        "suggest_index" | "index_suggestions" => "suggest_indexes",
+        "create_options" | "table_options" => "get_create_options",
         _ => tool_name,
     };
 
@@ -1543,6 +1619,416 @@ async fn process_tool_call(
             }
         }
 
+        "get_primary_key" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            match schema::get_primary_key_columns(database, table).await {
+                Ok(cols) if cols.is_empty() => {
+                    conversation.push_str(&format!("\n\nTool result: No primary key on {database}.{table}"));
+                }
+                Ok(cols) => {
+                    let result = format!("Primary key on {database}.{table}: {}", cols.join(", "));
+                    conversation.push_str(&format!("\n\nTool result: {result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "get_unique_keys" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            match schema::get_unique_key_columns(database, table).await {
+                Ok(indexes) if indexes.is_empty() => {
+                    conversation.push_str(&format!("\n\nTool result: No unique keys on {database}.{table}"));
+                }
+                Ok(indexes) => {
+                    let lines: Vec<String> = indexes.iter().map(|i| {
+                        format!("  {} ({})", i.name, i.column)
+                    }).collect();
+                    let result = format!("Unique keys on {database}.{table}:\n{}", lines.join("\n"));
+                    conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "get_enum_values" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            let column = tool_call.get("column").and_then(|v| v.as_str()).unwrap_or("");
+            if column.is_empty() {
+                conversation.push_str(&format!("\n\nTool error: column parameter is required"));
+            } else {
+                match schema::get_enum_values(database, table, column).await {
+                    Ok(values) if values.is_empty() => {
+                        conversation.push_str(&format!("\n\nTool result: {database}.{table}.{column} is not an ENUM or SET type, or has no values"));
+                    }
+                    Ok(values) => {
+                        let result = format!("ENUM/SET values for {database}.{table}.{column}: {}", values.iter().map(|v| format!("'{}'", v)).collect::<Vec<_>>().join(", "));
+                        conversation.push_str(&format!("\n\nTool result: {result}"));
+                    }
+                    Err(e) => {
+                        conversation.push_str(&format!("\n\nTool error: {e}"));
+                    }
+                }
+            }
+        }
+
+        "get_auto_increment" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            match schema::get_auto_increment_value(database, table).await {
+                Ok(Some(value)) => {
+                    let result = format!("Auto-increment for {database}.{table}: next value = {}", value);
+                    conversation.push_str(&format!("\n\nTool result: {result}"));
+                }
+                Ok(None) => {
+                    conversation.push_str(&format!("\n\nTool result: No auto-increment column on {database}.{table}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "get_referenced_by" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            match schema::get_referencing_tables(database, table).await {
+                Ok(refs) if refs.is_empty() => {
+                    conversation.push_str(&format!("\n\nTool result: No tables reference {database}.{table}"));
+                }
+                Ok(refs) => {
+                    let lines: Vec<String> = refs.iter().map(|r| {
+                        format!("  {}.{} ({}) → references {}.{}", r.from_database, r.from_table, r.from_column, r.to_table, r.to_column)
+                    }).collect();
+                    let result = format!("Tables referencing {database}.{table}:\n{}", lines.join("\n"));
+                    conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "count_nulls" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            match schema::count_nulls_per_column(database, table).await {
+                Ok(nulls) if nulls.is_empty() => {
+                    conversation.push_str(&format!("\n\nTool result: No columns found for {database}.{table}"));
+                }
+                Ok(nulls) => {
+                    let lines: Vec<String> = nulls.iter().filter(|n| n.null_count > 0).map(|n| {
+                        let pct = if n.total_count > 0 { (n.null_count as f64 / n.total_count as f64 * 100.0).round() } else { 0.0 };
+                        format!("  {}: {}/{} NULL ({}%)", n.column, n.null_count, n.total_count, pct)
+                    }).collect();
+                    if lines.is_empty() {
+                        conversation.push_str(&format!("\n\nTool result: No NULL values found in {database}.{table}"));
+                    } else {
+                        let result = format!("NULL counts for {database}.{table}:\n{}", lines.join("\n"));
+                        conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                    }
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "get_column_stats" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            match schema::get_column_statistics(database, table).await {
+                Ok(stats) if stats.is_empty() => {
+                    conversation.push_str(&format!("\n\nTool result: No columns found for {database}.{table}"));
+                }
+                Ok(stats) => {
+                    let lines: Vec<String> = stats.iter().map(|s| {
+                        let mut parts = vec![format!("  {} [{}]: {} values, {} distinct", s.column, s.data_type, s.count, s.distinct_count)];
+                        if let Some(ref min) = s.min_val {
+                            parts.push(format!("min='{}'", min));
+                        }
+                        if let Some(ref max) = s.max_val {
+                            parts.push(format!("max='{}'", max));
+                        }
+                        if let Some(avg) = s.avg_val {
+                            parts.push(format!("avg={:.2}", avg));
+                        }
+                        parts.join(", ")
+                    }).collect();
+                    let result = format!("Column statistics for {database}.{table}:\n{}", lines.join("\n"));
+                    conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "get_database_size" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            if database.is_empty() {
+                conversation.push_str(&format!("\n\nTool error: database parameter is required"));
+            } else {
+                match schema::get_database_size(database).await {
+                    Ok(size) => {
+                        let result = format!(
+                            "Database '{}' size: {} MB total ({} MB data, {} MB indexes), {} tables, ~{} rows",
+                            database, size.total_size_mb, size.data_size_mb, size.index_size_mb, size.table_count, size.total_rows
+                        );
+                        conversation.push_str(&format!("\n\nTool result: {result}"));
+                    }
+                    Err(e) => {
+                        conversation.push_str(&format!("\n\nTool error: {e}"));
+                    }
+                }
+            }
+        }
+
+        "get_table_size_ranking" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            if database.is_empty() {
+                conversation.push_str(&format!("\n\nTool error: database parameter is required"));
+            } else {
+                match schema::get_table_size_ranking(database).await {
+                    Ok(entries) if entries.is_empty() => {
+                        conversation.push_str(&format!("\n\nTool result: No tables found in {database}"));
+                    }
+                    Ok(entries) => {
+                        let lines: Vec<String> = entries.iter().take(20).enumerate().map(|(i, e)| {
+                            format!("  {}. {} — {} rows, {} MB total ({} MB data + {} MB indexes)", i + 1, e.table, e.rows, e.total_size_mb, e.data_size_mb, e.index_size_mb)
+                        }).collect();
+                        let more = if entries.len() > 20 { format!("\n... and {} more tables", entries.len() - 20) } else { "".to_string() };
+                        let result = format!("Table size ranking for '{}':\n{}{}", database, lines.join("\n"), more);
+                        conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                    }
+                    Err(e) => {
+                        conversation.push_str(&format!("\n\nTool error: {e}"));
+                    }
+                }
+            }
+        }
+
+        "get_active_connections" => {
+            match schema::get_active_connections().await {
+                Ok(conns) if conns.is_empty() => {
+                    conversation.push_str(&format!("\n\nTool result: No active connections found"));
+                }
+                Ok(conns) => {
+                    let lines: Vec<String> = conns.iter().take(20).map(|c| {
+                        let db = c.database.as_deref().unwrap_or("NULL");
+                        let state = c.state.as_deref().unwrap_or("");
+                        let info_preview = c.info.as_deref().map(|i| if i.len() > 50 { format!("{}...", &i[..50]) } else { i.to_string() }).unwrap_or_default();
+                        format!("  #{} {}@{} [{}] db={} time={}s{}{}", c.id, c.user, c.host, c.command, db, c.time,
+                            if !state.is_empty() { format!(" state={}", state) } else { "".to_string() },
+                            if !info_preview.is_empty() { format!(" query={}", info_preview) } else { "".to_string() }
+                        )
+                    }).collect();
+                    let total = conns.len();
+                    let more = if total > 20 { format!("\n... and {} more", total - 20) } else { "".to_string() };
+                    let result = format!("Active connections ({} total):\n{}{}", total, lines.join("\n"), more);
+                    conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "get_slow_queries" => {
+            let limit = tool_call.get("limit").and_then(|v| v.as_str())
+                .and_then(|v| v.parse::<usize>().ok()).unwrap_or(10);
+            match schema::get_slow_queries(limit).await {
+                Ok(queries) if queries.is_empty() => {
+                    conversation.push_str(&format!("\n\nTool result: No slow queries found (performance_schema may be disabled or no queries recorded)"));
+                }
+                Ok(queries) => {
+                    let lines: Vec<String> = queries.iter().enumerate().map(|(i, q)| {
+                        let query_preview = if q.query.len() > 100 { format!("{}...", &q.query[..100]) } else { q.query.clone() };
+                        format!("  {}. [{}x] avg {:.2}ms, total {:.2}ms, examined {} rows: {}", i + 1, q.exec_count, q.avg_timer_ms, q.total_timer_ms, q.rows_examined, query_preview)
+                    }).collect();
+                    let result = format!("Top {} slow queries:\n{}", queries.len(), lines.join("\n"));
+                    conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "get_table_partitions" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            match schema::get_table_partitions(database, table).await {
+                Ok(parts) if parts.is_empty() => {
+                    conversation.push_str(&format!("\n\nTool result: {database}.{table} is not partitioned"));
+                }
+                Ok(parts) => {
+                    let lines: Vec<String> = parts.iter().map(|p| {
+                        let method = if p.method != "NONE" { format!(" [{}]", p.method) } else { "".to_string() };
+                        let desc = p.description.as_deref().unwrap_or("");
+                        format!("  {}{}: {} rows, {} bytes{}", p.name, method, p.rows, p.data_length, if !desc.is_empty() { format!(" ({})", desc) } else { "".to_string() })
+                    }).collect();
+                    let result = format!("Partitions for {database}.{table}:\n{}", lines.join("\n"));
+                    conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "get_column_charset" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            match schema::get_column_charset_info(database, table).await {
+                Ok(infos) if infos.is_empty() => {
+                    conversation.push_str(&format!("\n\nTool result: No columns found for {database}.{table}"));
+                }
+                Ok(infos) => {
+                    let lines: Vec<String> = infos.iter().map(|i| {
+                        let cs = i.character_set.as_deref().unwrap_or("-");
+                        let coll = i.collation.as_deref().unwrap_or("-");
+                        format!("  {} [{}]: charset={}, collation={}", i.column, i.data_type, cs, coll)
+                    }).collect();
+                    let result = format!("Charset info for {database}.{table}:\n{}", lines.join("\n"));
+                    conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "get_data_type_summary" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            if database.is_empty() {
+                conversation.push_str(&format!("\n\nTool error: database parameter is required"));
+            } else {
+                match schema::get_data_type_summary(database).await {
+                    Ok(summary) if summary.is_empty() => {
+                        conversation.push_str(&format!("\n\nTool result: No data found for {database}"));
+                    }
+                    Ok(summary) => {
+                        let lines: Vec<String> = summary.iter().map(|s| {
+                            let tables_preview = if s.tables.len() > 5 { format!("{}... ({} tables)", s.tables[..5].join(", "), s.tables.len()) } else { s.tables.join(", ") };
+                            format!("  {}: {} columns in {}", s.data_type, s.column_count, tables_preview)
+                        }).collect();
+                        let result = format!("Data type summary for '{}':\n{}", database, lines.join("\n"));
+                        conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                    }
+                    Err(e) => {
+                        conversation.push_str(&format!("\n\nTool error: {e}"));
+                    }
+                }
+            }
+        }
+
+        "find_orphan_records" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            let column = tool_call.get("column").and_then(|v| v.as_str()).unwrap_or("");
+            let ref_database = tool_call.get("ref_database").and_then(|v| v.as_str()).unwrap_or(database);
+            let ref_table = tool_call.get("ref_table").and_then(|v| v.as_str()).unwrap_or("");
+            let ref_column = tool_call.get("ref_column").and_then(|v| v.as_str()).unwrap_or("");
+
+            if database.is_empty() || table.is_empty() || column.is_empty() || ref_table.is_empty() || ref_column.is_empty() {
+                conversation.push_str(&format!("\n\nTool error: Required parameters: database, table, column, ref_table, ref_column. Example: find_orphan_records(database='db1', table='orders', column='customer_id', ref_database='db1', ref_table='customers', ref_column='id')"));
+            } else {
+                match schema::find_orphan_records(database, table, column, ref_database, ref_table, ref_column).await {
+                    Ok(count) => {
+                        if count == 0 {
+                            let result = format!("No orphan records in {database}.{table}.{column} → {ref_database}.{ref_table}.{ref_column}");
+                            conversation.push_str(&format!("\n\nTool result: {result}"));
+                        } else {
+                            let result = format!("Found {} orphan records in {database}.{table}.{column} where no matching {ref_database}.{ref_table}.{ref_column} exists", count);
+                            conversation.push_str(&format!("\n\nTool result: {result}"));
+                        }
+                    }
+                    Err(e) => {
+                        conversation.push_str(&format!("\n\nTool error: {e}"));
+                    }
+                }
+            }
+        }
+
+        "get_table_aliases" => {
+            let similar = schema::get_similar_tables(all_schemas);
+            if similar.is_empty() {
+                conversation.push_str(&format!("\n\nTool result: No similarly named tables found across databases"));
+            } else {
+                let lines: Vec<String> = similar.iter().take(20).map(|(a, b, score)| {
+                    format!("  {} ↔ {} (similarity: {:.0}%)", a, b, score * 100.0)
+                }).collect();
+                let result = format!("Similarly named tables:\n{}", lines.join("\n"));
+                conversation.push_str(&format!("\n\nTool result:\n{result}"));
+            }
+        }
+
+        "suggest_indexes" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            if database.is_empty() || table.is_empty() {
+                conversation.push_str(&format!("\n\nTool error: database and table parameters are required"));
+            } else {
+                match schema::suggest_indexes(database, table).await {
+                    Ok(suggestions) if suggestions.is_empty() => {
+                        conversation.push_str(&format!("\n\nTool result: No index suggestions for {database}.{table} — all columns appear to be properly indexed"));
+                    }
+                    Ok(suggestions) => {
+                        let lines: Vec<String> = suggestions.iter().map(|s| {
+                            format!("  [{}] {}.{} — {}", s.priority, s.table, s.column, s.reason)
+                        }).collect();
+                        let result = format!("Index suggestions for {database}.{table}:\n{}", lines.join("\n"));
+                        conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                    }
+                    Err(e) => {
+                        conversation.push_str(&format!("\n\nTool error: {e}"));
+                    }
+                }
+            }
+        }
+
+        "get_create_options" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            match schema::get_create_options(database, table).await {
+                Ok(opts) => {
+                    let mut parts = vec![
+                        format!("Table {database}.{table} options:"),
+                        format!("  Engine: {}", opts.engine),
+                        format!("  Row format: {}", opts.row_format),
+                        format!("  Collation: {}", opts.table_collation),
+                    ];
+                    if !opts.create_options.is_empty() && opts.create_options != "none" {
+                        parts.push(format!("  Create options: {}", opts.create_options));
+                    }
+                    if let Some(ai) = opts.auto_increment {
+                        parts.push(format!("  Auto increment: {}", ai));
+                    }
+                    if let Some(ref pk) = opts.pack_keys {
+                        parts.push(format!("  Pack keys: {}", pk));
+                    }
+                    if let Some(ck) = opts.checksum {
+                        parts.push(format!("  Checksum: {}", ck));
+                    }
+                    if let Some(ref dkw) = opts.delay_key_write {
+                        parts.push(format!("  Delay key write: {}", dkw));
+                    }
+                    let result = parts.join("\n");
+                    conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
         _ => {
             conversation.push_str(&format!(
                 "\n\nTool error: Unknown tool '{tool_name}'.\n\
@@ -1552,7 +2038,12 @@ async fn process_tool_call(
                  list_views, list_procedures, list_triggers, get_table_stats, get_table_status, \
                  analyze_table_health, find_relationships, find_similar_columns, compare_tables, \
                  get_server_info, get_variable, get_user_privileges, \
-                 explain_query, validate_sql, security_check"
+                 explain_query, validate_sql, security_check, \
+                 get_primary_key, get_unique_keys, get_enum_values, get_auto_increment, \
+                 get_referenced_by, count_nulls, get_column_stats, get_database_size, \
+                 get_table_size_ranking, get_active_connections, get_slow_queries, \
+                 get_table_partitions, get_column_charset, get_data_type_summary, \
+                 find_orphan_records, get_table_aliases, suggest_indexes, get_create_options"
             ));
         }
     }

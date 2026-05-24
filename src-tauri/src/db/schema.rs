@@ -1230,3 +1230,847 @@ pub struct TableHealth {
     pub fragmentation_percent: f64,
 }
 
+pub async fn get_primary_key_columns(database: &str, table: &str) -> Result<Vec<String>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let cols: Vec<String> = conn
+        .query_map(
+            format!(
+                "SELECT COLUMN_NAME FROM information_schema.COLUMNS
+                 WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}' AND COLUMN_KEY = 'PRI'
+                 ORDER BY ORDINAL_POSITION",
+                database, table
+            ),
+            |row: Row| row.get(0).unwrap_or_default(),
+        )
+        .await?;
+
+    Ok(cols)
+}
+
+pub async fn get_unique_key_columns(database: &str, table: &str) -> Result<Vec<IndexInfo>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let indexes = conn
+        .query_map(
+            format!(
+                "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE, SEQ_IN_INDEX, INDEX_TYPE
+                 FROM information_schema.STATISTICS
+                 WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}' AND NON_UNIQUE = 0
+                 ORDER BY INDEX_NAME, SEQ_IN_INDEX",
+                database, table
+            ),
+            |row: Row| IndexInfo {
+                name: row.get(0).unwrap_or_default(),
+                column: row.get(1).unwrap_or_default(),
+                non_unique: false,
+                seq: row.get(3).unwrap_or(1),
+                index_type: row.get(4).unwrap_or_default(),
+            },
+        )
+        .await?;
+
+    Ok(indexes)
+}
+
+pub async fn get_enum_values(database: &str, table: &str, column: &str) -> Result<Vec<String>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let col_type: Option<String> = conn
+        .query_first(format!(
+            "SELECT COLUMN_TYPE FROM information_schema.COLUMNS
+             WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}' AND COLUMN_NAME = '{}'",
+            database, table, column
+        ))
+        .await?;
+
+    let col_type = col_type.unwrap_or_default();
+    let col_type_lower = col_type.to_lowercase();
+
+    if !col_type_lower.starts_with("enum(") && !col_type_lower.starts_with("set(") {
+        return Ok(Vec::new());
+    }
+
+    let start = match col_type.find('(') {
+        Some(i) => i + 1,
+        None => return Ok(Vec::new()),
+    };
+    let end = match col_type.rfind(')') {
+        Some(i) => i,
+        None => return Ok(Vec::new()),
+    };
+
+    let inner = &col_type[start..end];
+    let values: Vec<String> = inner
+        .split(',')
+        .map(|v| v.trim().trim_matches('\'').to_string())
+        .collect();
+
+    Ok(values)
+}
+
+pub async fn get_auto_increment_value(database: &str, table: &str) -> Result<Option<u64>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let result: Option<u64> = conn
+        .query_first(format!(
+            "SELECT AUTO_INCREMENT FROM information_schema.TABLES
+             WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}'",
+            database, table
+        ))
+        .await?;
+
+    Ok(result)
+}
+
+pub async fn get_referencing_tables(database: &str, table: &str) -> Result<Vec<ForeignKeyRelation>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let refs: Vec<ForeignKeyRelation> = conn
+        .query_map(
+            format!(
+                "SELECT
+                    kcu.TABLE_SCHEMA AS from_db,
+                    kcu.TABLE_NAME AS from_table,
+                    kcu.COLUMN_NAME AS from_column,
+                    kcu.REFERENCED_TABLE_SCHEMA AS to_db,
+                    kcu.REFERENCED_TABLE_NAME AS to_table,
+                    kcu.REFERENCED_COLUMN_NAME AS to_column,
+                    kcu.CONSTRAINT_NAME AS constraint_name
+                 FROM information_schema.KEY_COLUMN_USAGE kcu
+                 JOIN information_schema.TABLE_CONSTRAINTS tc
+                     ON kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+                     AND kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
+                     AND tc.CONSTRAINT_TYPE = 'FOREIGN KEY'
+                 WHERE kcu.REFERENCED_TABLE_SCHEMA = '{}'
+                     AND kcu.REFERENCED_TABLE_NAME = '{}'",
+                database, table
+            ),
+            |row: Row| ForeignKeyRelation {
+                from_database: row.get(0).unwrap_or_default(),
+                from_table: row.get(1).unwrap_or_default(),
+                from_column: row.get(2).unwrap_or_default(),
+                to_database: row.get(3).unwrap_or_default(),
+                to_table: row.get(4).unwrap_or_default(),
+                to_column: row.get(5).unwrap_or_default(),
+                constraint_name: row.get(6),
+            },
+        )
+        .await?;
+
+    Ok(refs)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NullCountInfo {
+    pub column: String,
+    pub null_count: u64,
+    pub total_count: u64,
+}
+
+pub async fn count_nulls_per_column(database: &str, table: &str) -> Result<Vec<NullCountInfo>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let columns: Vec<String> = conn
+        .query_map(
+            format!(
+                "SELECT COLUMN_NAME FROM information_schema.COLUMNS
+                 WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}'
+                 ORDER BY ORDINAL_POSITION",
+                database, table
+            ),
+            |row: Row| row.get(0).unwrap_or_default(),
+        )
+        .await?;
+
+    let total: u64 = conn
+        .query_first(format!("SELECT COUNT(*) FROM `{}`.`{}`", database, table))
+        .await?
+        .unwrap_or(0);
+
+    let mut results = Vec::new();
+    for col in &columns {
+        let null_count: u64 = conn
+            .query_first(format!(
+                "SELECT COUNT(*) FROM `{}`.`{}` WHERE `{}` IS NULL",
+                database, table, col
+            ))
+            .await?
+            .unwrap_or(0);
+        results.push(NullCountInfo {
+            column: col.clone(),
+            null_count,
+            total_count: total,
+        });
+    }
+
+    Ok(results)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColumnStat {
+    pub column: String,
+    pub data_type: String,
+    pub min_val: Option<String>,
+    pub max_val: Option<String>,
+    pub avg_val: Option<f64>,
+    pub count: u64,
+    pub distinct_count: u64,
+}
+
+pub async fn get_column_statistics(database: &str, table: &str) -> Result<Vec<ColumnStat>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let columns: Vec<(String, String)> = conn
+        .query_map(
+            format!(
+                "SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS
+                 WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}'
+                 ORDER BY ORDINAL_POSITION",
+                database, table
+            ),
+            |row: Row| (row.get(0).unwrap_or_default(), row.get(1).unwrap_or_default()),
+        )
+        .await?;
+
+    let numeric_types = [
+        "int", "tinyint", "smallint", "mediumint", "bigint",
+        "float", "double", "decimal", "numeric",
+        "date", "datetime", "timestamp", "time", "year",
+    ];
+
+    let mut results = Vec::new();
+    for (col, dtype) in &columns {
+        let is_numeric = numeric_types.contains(&dtype.as_str());
+
+        let count: u64 = conn
+            .query_first(format!(
+                "SELECT COUNT(*) FROM `{}`.`{}` WHERE `{}` IS NOT NULL",
+                database, table, col
+            ))
+            .await?
+            .unwrap_or(0);
+
+        let distinct_count: u64 = conn
+            .query_first(format!(
+                "SELECT COUNT(DISTINCT `{}`) FROM `{}`.`{}`",
+                col, database, table
+            ))
+            .await?
+            .unwrap_or(0);
+
+        let (min_val, max_val, avg_val) = if is_numeric && count > 0 {
+            let min_val: Option<String> = conn
+                .query_first(format!(
+                    "SELECT CAST(MIN(`{}`) AS CHAR) FROM `{}`.`{}`",
+                    col, database, table
+                ))
+                .await?;
+            let max_val: Option<String> = conn
+                .query_first(format!(
+                    "SELECT CAST(MAX(`{}`) AS CHAR) FROM `{}`.`{}`",
+                    col, database, table
+                ))
+                .await?;
+            let avg_val: Option<f64> = conn
+                .query_first(format!(
+                    "SELECT AVG(`{}`) FROM `{}`.`{}`",
+                    col, database, table
+                ))
+                .await?;
+            (min_val, max_val, avg_val)
+        } else if count > 0 {
+            let min_val: Option<String> = conn
+                .query_first(format!(
+                    "SELECT MIN(`{}`) FROM `{}`.`{}`",
+                    col, database, table
+                ))
+                .await?;
+            let max_val: Option<String> = conn
+                .query_first(format!(
+                    "SELECT MAX(`{}`) FROM `{}`.`{}`",
+                    col, database, table
+                ))
+                .await?;
+            (min_val, max_val, None)
+        } else {
+            (None, None, None)
+        };
+
+        results.push(ColumnStat {
+            column: col.clone(),
+            data_type: dtype.clone(),
+            min_val,
+            max_val,
+            avg_val,
+            count,
+            distinct_count,
+        });
+    }
+
+    Ok(results)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabaseSize {
+    pub total_size_mb: f64,
+    pub data_size_mb: f64,
+    pub index_size_mb: f64,
+    pub table_count: u64,
+    pub total_rows: u64,
+}
+
+pub async fn get_database_size(database: &str) -> Result<DatabaseSize, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let result: Option<(Option<f64>, Option<f64>, Option<f64>, Option<u64>, Option<u64>)> = conn
+        .query_first(format!(
+            "SELECT
+                ROUND((SUM(DATA_LENGTH) + SUM(INDEX_LENGTH)) / 1024.0 / 1024.0, 2) as total_mb,
+                ROUND(SUM(DATA_LENGTH) / 1024.0 / 1024.0, 2) as data_mb,
+                ROUND(SUM(INDEX_LENGTH) / 1024.0 / 1024.0, 2) as index_mb,
+                COUNT(*) as table_count,
+                SUM(TABLE_ROWS) as total_rows
+             FROM information_schema.TABLES
+             WHERE TABLE_SCHEMA = '{}' AND TABLE_TYPE = 'BASE TABLE'",
+            database
+        ))
+        .await?;
+
+    match result {
+        Some((total, data, index, tables, rows)) => Ok(DatabaseSize {
+            total_size_mb: total.unwrap_or(0.0),
+            data_size_mb: data.unwrap_or(0.0),
+            index_size_mb: index.unwrap_or(0.0),
+            table_count: tables.unwrap_or(0),
+            total_rows: rows.unwrap_or(0),
+        }),
+        None => Ok(DatabaseSize {
+            total_size_mb: 0.0,
+            data_size_mb: 0.0,
+            index_size_mb: 0.0,
+            table_count: 0,
+            total_rows: 0,
+        }),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableSizeEntry {
+    pub table: String,
+    pub rows: u64,
+    pub data_size_mb: f64,
+    pub index_size_mb: f64,
+    pub total_size_mb: f64,
+}
+
+pub async fn get_table_size_ranking(database: &str) -> Result<Vec<TableSizeEntry>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let entries = conn
+        .query_map(
+            format!(
+                "SELECT TABLE_NAME, TABLE_ROWS,
+                        ROUND(DATA_LENGTH / 1024.0 / 1024.0, 2),
+                        ROUND(INDEX_LENGTH / 1024.0 / 1024.0, 2),
+                        ROUND((DATA_LENGTH + INDEX_LENGTH) / 1024.0 / 1024.0, 2)
+                 FROM information_schema.TABLES
+                 WHERE TABLE_SCHEMA = '{}' AND TABLE_TYPE = 'BASE TABLE'
+                 ORDER BY (DATA_LENGTH + INDEX_LENGTH) DESC",
+                database
+            ),
+            |row: Row| TableSizeEntry {
+                table: row.get(0).unwrap_or_default(),
+                rows: row.get(1).unwrap_or(0),
+                data_size_mb: row.get(2).unwrap_or(0.0),
+                index_size_mb: row.get(3).unwrap_or(0.0),
+                total_size_mb: row.get(4).unwrap_or(0.0),
+            },
+        )
+        .await?;
+
+    Ok(entries)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionInfo {
+    pub id: u64,
+    pub user: String,
+    pub host: String,
+    pub database: Option<String>,
+    pub command: String,
+    pub time: u64,
+    pub state: Option<String>,
+    pub info: Option<String>,
+}
+
+pub async fn get_active_connections() -> Result<Vec<ConnectionInfo>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let connections = conn
+        .query_map(
+            "SELECT ID, USER, HOST, DB, COMMAND, TIME, STATE, INFO
+             FROM information_schema.PROCESSLIST
+             ORDER BY TIME DESC",
+            |row: Row| ConnectionInfo {
+                id: row.get(0).unwrap_or(0),
+                user: row.get(1).unwrap_or_default(),
+                host: row.get(2).unwrap_or_default(),
+                database: row.get(3),
+                command: row.get(4).unwrap_or_default(),
+                time: row.get(5).unwrap_or(0),
+                state: row.get(6),
+                info: row.get(7),
+            },
+        )
+        .await?;
+
+    Ok(connections)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlowQueryInfo {
+    pub query: String,
+    pub exec_count: u64,
+    pub avg_timer_ms: f64,
+    pub total_timer_ms: f64,
+    pub rows_examined: u64,
+    pub rows_sent: u64,
+}
+
+pub async fn get_slow_queries(limit: usize) -> Result<Vec<SlowQueryInfo>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let has_perf_schema: u64 = conn
+        .query_first(
+            "SELECT COUNT(*) FROM information_schema.TABLES
+             WHERE TABLE_SCHEMA = 'performance_schema'
+             AND TABLE_NAME = 'events_statements_summary_by_digest'"
+        )
+        .await?
+        .unwrap_or(0);
+
+    if has_perf_schema == 0 {
+        let slow_on: u64 = conn
+            .query_first("SELECT @@slow_query_log")
+            .await?
+            .unwrap_or(0);
+
+        if slow_on == 0 {
+            return Ok(Vec::new());
+        }
+
+        let file: String = conn
+            .query_first("SELECT @@slow_query_log_file")
+            .await?
+            .unwrap_or_else(|| "not configured".to_string());
+
+        return Err(AppError::QueryExecution(format!(
+            "performance_schema not available. Slow query log is {} (file: {})",
+            if slow_on != 0 { "ON" } else { "OFF" },
+            file
+        )));
+    }
+
+    let queries = conn
+        .query_map(
+            format!(
+                "SELECT
+                    DIGEST_TEXT as query,
+                    COUNT_STAR as exec_count,
+                    ROUND(AVG_TIMER_WAIT / 1000000000, 2) as avg_ms,
+                    ROUND(SUM_TIMER_WAIT / 1000000000, 2) as total_ms,
+                    SUM_ROWS_EXAMINED as rows_examined,
+                    SUM_ROWS_SENT as rows_sent
+                 FROM performance_schema.events_statements_summary_by_digest
+                 WHERE DIGEST_TEXT IS NOT NULL
+                 ORDER BY SUM_TIMER_WAIT DESC
+                 LIMIT {}",
+                limit
+            ),
+            |row: Row| SlowQueryInfo {
+                query: row.get(0).unwrap_or_default(),
+                exec_count: row.get(1).unwrap_or(0),
+                avg_timer_ms: row.get(2).unwrap_or(0.0),
+                total_timer_ms: row.get(3).unwrap_or(0.0),
+                rows_examined: row.get(4).unwrap_or(0),
+                rows_sent: row.get(5).unwrap_or(0),
+            },
+        )
+        .await?;
+
+    Ok(queries)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartitionInfo {
+    pub name: String,
+    pub method: String,
+    pub expression: Option<String>,
+    pub rows: u64,
+    pub data_length: u64,
+    pub description: Option<String>,
+}
+
+pub async fn get_table_partitions(database: &str, table: &str) -> Result<Vec<PartitionInfo>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let partitions = conn
+        .query_map(
+            format!(
+                "SELECT PARTITION_NAME, PARTITION_METHOD, PARTITION_EXPRESSION,
+                        TABLE_ROWS, DATA_LENGTH, PARTITION_DESCRIPTION
+                 FROM information_schema.PARTITIONS
+                 WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}'
+                 ORDER BY PARTITION_ORDINAL_POSITION",
+                database, table
+            ),
+            |row: Row| PartitionInfo {
+                name: row.get(0).unwrap_or_else(|| "full table".to_string()),
+                method: row.get(1).unwrap_or_else(|| "NONE".to_string()),
+                expression: row.get(2),
+                rows: row.get(3).unwrap_or(0),
+                data_length: row.get(4).unwrap_or(0),
+                description: row.get(5),
+            },
+        )
+        .await?;
+
+    Ok(partitions)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColumnCharsetInfo {
+    pub column: String,
+    pub data_type: String,
+    pub character_set: Option<String>,
+    pub collation: Option<String>,
+}
+
+pub async fn get_column_charset_info(database: &str, table: &str) -> Result<Vec<ColumnCharsetInfo>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let infos = conn
+        .query_map(
+            format!(
+                "SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_SET_NAME, COLLATION_NAME
+                 FROM information_schema.COLUMNS
+                 WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}'
+                 ORDER BY ORDINAL_POSITION",
+                database, table
+            ),
+            |row: Row| ColumnCharsetInfo {
+                column: row.get(0).unwrap_or_default(),
+                data_type: row.get(1).unwrap_or_default(),
+                character_set: row.get(2),
+                collation: row.get(3),
+            },
+        )
+        .await?;
+
+    Ok(infos)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataTypeSummary {
+    pub data_type: String,
+    pub column_count: u64,
+    pub tables: Vec<String>,
+}
+
+pub async fn get_data_type_summary(database: &str) -> Result<Vec<DataTypeSummary>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let summaries = conn
+        .query_map(
+            format!(
+                "SELECT DATA_TYPE, COUNT(*) as cnt, GROUP_CONCAT(DISTINCT TABLE_NAME ORDER BY TABLE_NAME SEPARATOR ', ') as tbls
+                 FROM information_schema.COLUMNS
+                 WHERE TABLE_SCHEMA = '{}'
+                 GROUP BY DATA_TYPE
+                 ORDER BY cnt DESC",
+                database
+            ),
+            |row: Row| DataTypeSummary {
+                data_type: row.get(0).unwrap_or_default(),
+                column_count: row.get(1).unwrap_or(0),
+                tables: row.get::<String, _>(2)
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+            },
+        )
+        .await?;
+
+    Ok(summaries)
+}
+
+pub async fn find_orphan_records(
+    database: &str,
+    table: &str,
+    column: &str,
+    ref_database: &str,
+    ref_table: &str,
+    ref_column: &str,
+) -> Result<u64, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let count: u64 = conn
+        .query_first(format!(
+            "SELECT COUNT(*) FROM `{}`.`{}` t1
+             LEFT JOIN `{}`.`{}` t2 ON t1.`{}` = t2.`{}`
+             WHERE t1.`{}` IS NOT NULL AND t2.`{}` IS NULL",
+            database, table, ref_database, ref_table, column, ref_column, column, ref_column
+        ))
+        .await?
+        .unwrap_or(0);
+
+    Ok(count)
+}
+
+pub fn get_similar_tables(schemas: &[Schema]) -> Vec<(String, String, f64)> {
+    let mut all_tables: Vec<(&str, &str)> = Vec::new();
+    for schema in schemas {
+        for table in &schema.tables {
+            all_tables.push((&schema.database, &table.name));
+        }
+    }
+
+    let mut similar = Vec::new();
+    for i in 0..all_tables.len() {
+        for j in (i + 1)..all_tables.len() {
+            let (db1, t1) = all_tables[i];
+            let (db2, t2) = all_tables[j];
+
+            let t1_lower = t1.to_lowercase();
+            let t2_lower = t2.to_lowercase();
+
+            let score = if t1_lower == t2_lower {
+                1.0
+            } else if t1_lower.starts_with(&t2_lower) || t2_lower.starts_with(&t1_lower) {
+                0.8
+            } else if t1_lower.contains(&t2_lower) || t2_lower.contains(&t1_lower) {
+                0.6
+            } else if levenshtein_similarity(&t1_lower, &t2_lower) > 0.7 {
+                levenshtein_similarity(&t1_lower, &t2_lower)
+            } else {
+                continue;
+            };
+
+            similar.push((
+                format!("{}.{}", db1, t1),
+                format!("{}.{}", db2, t2),
+                score,
+            ));
+        }
+    }
+
+    similar.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    similar
+}
+
+fn levenshtein_similarity(a: &str, b: &str) -> f64 {
+    let a_len = a.chars().count();
+    let b_len = b.chars().count();
+
+    if a_len == 0 && b_len == 0 {
+        return 1.0;
+    }
+    if a_len == 0 || b_len == 0 {
+        return 0.0;
+    }
+
+    let max_len = a_len.max(b_len) as f64;
+    let dist = levenshtein_distance(a, b);
+    1.0 - (dist as f64 / max_len)
+}
+
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let a_len = a_chars.len();
+    let b_len = b_chars.len();
+
+    if a_len == 0 { return b_len; }
+    if b_len == 0 { return a_len; }
+
+    let mut matrix = vec![vec![0; b_len + 1]; a_len + 1];
+
+    for i in 0..=a_len { matrix[i][0] = i; }
+    for j in 0..=b_len { matrix[0][j] = j; }
+
+    for i in 1..=a_len {
+        for j in 1..=b_len {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+            matrix[i][j] = (matrix[i - 1][j] + 1)
+                .min(matrix[i][j - 1] + 1)
+                .min(matrix[i - 1][j - 1] + cost);
+        }
+    }
+
+    matrix[a_len][b_len]
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexSuggestion {
+    pub table: String,
+    pub column: String,
+    pub reason: String,
+    pub priority: String,
+}
+
+pub async fn suggest_indexes(database: &str, table: &str) -> Result<Vec<IndexSuggestion>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let mut suggestions = Vec::new();
+
+    let columns: Vec<(String, String, String)> = conn
+        .query_map(
+            format!(
+                "SELECT COLUMN_NAME, COLUMN_KEY, DATA_TYPE FROM information_schema.COLUMNS
+                 WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}'
+                 ORDER BY ORDINAL_POSITION",
+                database, table
+            ),
+            |row: Row| (row.get(0).unwrap_or_default(), row.get(1).unwrap_or_default(), row.get(2).unwrap_or_default()),
+        )
+        .await?;
+
+    let existing_indexes: Vec<String> = conn
+        .query_map(
+            format!(
+                "SELECT DISTINCT INDEX_NAME FROM information_schema.STATISTICS
+                 WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}'",
+                database, table
+            ),
+            |row: Row| row.get(0).unwrap_or_default(),
+        )
+        .await?;
+
+    for (col, key, _dtype) in &columns {
+        if !key.is_empty() {
+            continue;
+        }
+
+        let col_lower = col.to_lowercase();
+        let existing_lower: Vec<String> = existing_indexes.iter().map(|i| i.to_lowercase()).collect();
+
+        if (col_lower.ends_with("_id") || col_lower.ends_with("id"))
+            && !existing_lower.iter().any(|i| i.contains(&col_lower))
+        {
+            suggestions.push(IndexSuggestion {
+                table: format!("{}.{}", database, table),
+                column: col.clone(),
+                reason: "Foreign key column — index recommended for JOIN performance".to_string(),
+                priority: "HIGH".to_string(),
+            });
+        }
+
+        if (col_lower.contains("status") || col_lower.contains("type") || col_lower.contains("category"))
+            && !existing_lower.iter().any(|i| i.contains(&col_lower))
+        {
+            suggestions.push(IndexSuggestion {
+                table: format!("{}.{}", database, table),
+                column: col.clone(),
+                reason: "Low-cardinality filtering column — index for WHERE clauses".to_string(),
+                priority: "MEDIUM".to_string(),
+            });
+        }
+
+        if (col_lower.contains("date") || col_lower.contains("time") || col_lower.contains("created") || col_lower.contains("updated"))
+            && !existing_lower.iter().any(|i| i.contains(&col_lower))
+        {
+            suggestions.push(IndexSuggestion {
+                table: format!("{}.{}", database, table),
+                column: col.clone(),
+                reason: "Date/time column — index for range queries and ORDER BY".to_string(),
+                priority: "HIGH".to_string(),
+            });
+        }
+
+        if (col_lower == "email" || col_lower == "username" || col_lower == "phone" || col_lower == "slug")
+            && !existing_lower.iter().any(|i| i.contains(&col_lower))
+        {
+            suggestions.push(IndexSuggestion {
+                table: format!("{}.{}", database, table),
+                column: col.clone(),
+                reason: "Lookup column — UNIQUE index recommended".to_string(),
+                priority: "HIGH".to_string(),
+            });
+        }
+
+        if col_lower.contains("name") && !existing_lower.iter().any(|i| i.contains(&col_lower)) {
+            suggestions.push(IndexSuggestion {
+                table: format!("{}.{}", database, table),
+                column: col.clone(),
+                reason: "Name column — index for search and ORDER BY".to_string(),
+                priority: "LOW".to_string(),
+            });
+        }
+    }
+
+    Ok(suggestions)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateOptions {
+    pub engine: String,
+    pub row_format: String,
+    pub create_options: String,
+    pub table_collation: String,
+    pub auto_increment: Option<u64>,
+    pub pack_keys: Option<String>,
+    pub checksum: Option<u64>,
+    pub delay_key_write: Option<String>,
+}
+
+pub async fn get_create_options(database: &str, table: &str) -> Result<CreateOptions, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let result: Option<(
+        Option<String>, Option<String>, Option<String>, Option<String>,
+        Option<u64>, Option<String>, Option<u64>, Option<String>,
+    )> = conn
+        .query_first(format!(
+            "SELECT ENGINE, ROW_FORMAT, CREATE_OPTIONS, TABLE_COLLATION,
+                    AUTO_INCREMENT, PACK_KEYS, CHECKSUM, DELAY_KEY_WRITE
+             FROM information_schema.TABLES
+             WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}'",
+            database, table
+        ))
+        .await?;
+
+    match result {
+        Some((engine, row_format, create_opts, collation, auto_inc, pack_keys, checksum, delay_key_write)) => Ok(CreateOptions {
+            engine: engine.unwrap_or_default(),
+            row_format: row_format.unwrap_or_default(),
+            create_options: create_opts.unwrap_or_default(),
+            table_collation: collation.unwrap_or_default(),
+            auto_increment: auto_inc,
+            pack_keys,
+            checksum,
+            delay_key_write,
+        }),
+        None => Err(AppError::QueryExecution(format!("Table {}.{} not found", database, table))),
+    }
+}
+
