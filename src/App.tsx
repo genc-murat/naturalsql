@@ -408,7 +408,7 @@ function App() {
           {/* Editor + Results Split */}
           {!isEditorCollapsed ? (
             <div className="flex flex-1 overflow-hidden">
-              <div className="flex flex-col border-r border-[var(--border)] shrink-0" style={{ width: "42%" }}>
+              <div className="flex flex-col h-full border-r border-[var(--border)] shrink-0" style={{ width: "42%" }}>
                 <QueryEditor
                   key={activeTabId}
                   onResult={handleResult}

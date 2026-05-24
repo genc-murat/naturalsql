@@ -570,7 +570,9 @@ export function QueryEditor({
       </div>
 
       {/* Tool Call Trace */}
-      <ToolCallTrace steps={toolSteps} iterations={toolIterations} usedFallback={toolFallback} />
+      <div className="shrink-0 max-h-48 overflow-auto">
+        <ToolCallTrace steps={toolSteps} iterations={toolIterations} usedFallback={toolFallback} />
+      </div>
 
       {/* Toolbar */}
       <div className="flex items-center justify-between px-3 py-2 border-t border-[var(--border)] bg-[var(--bg-secondary)] shrink-0 gap-2 overflow-x-auto">
@@ -689,100 +691,102 @@ export function QueryEditor({
         </div>
       </div>
 
-      {/* Error Bar */}
-      {error && (
-        <div className="px-4 py-2 border-t border-red-500/20 bg-red-500/5 shrink-0">
-          <div className="flex items-start justify-between gap-2">
-            <div className="flex-1">
-              <div className="flex items-center gap-2 mb-1">
-                <XCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
-                <span className="text-sm font-medium text-red-500">Query Error</span>
+      <div className="shrink-0 max-h-56 overflow-auto">
+        {/* Error Bar */}
+        {error && (
+          <div className="px-4 py-2 border-t border-red-500/20 bg-red-500/5 shrink-0">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex-1">
+                <div className="flex items-center gap-2 mb-1">
+                  <XCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
+                  <span className="text-sm font-medium text-red-500">Query Error</span>
+                </div>
+                <p className="text-xs text-red-400/80 whitespace-pre-wrap">{error}</p>
               </div>
-              <p className="text-xs text-red-400/80 whitespace-pre-wrap">{error}</p>
+              <button
+                onClick={handleFixSql}
+                disabled={isFixing}
+                className="px-3 py-1.5 rounded-md bg-red-500/20 text-red-400 text-xs font-medium hover:bg-red-500/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5 shrink-0"
+              >
+                {isFixing ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Wrench className="w-3.5 h-3.5" />
+                )}
+                Fix with AI
+              </button>
             </div>
-            <button
-              onClick={handleFixSql}
-              disabled={isFixing}
-              className="px-3 py-1.5 rounded-md bg-red-500/20 text-red-400 text-xs font-medium hover:bg-red-500/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5 shrink-0"
-            >
-              {isFixing ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Wrench className="w-3.5 h-3.5" />
-              )}
-              Fix with AI
-            </button>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* AI Fix Result */}
-      {sqlFix && (
-        <div className="px-4 py-3 border-t border-[var(--border)] bg-green-500/5 shrink-0">
-          <div className="flex items-start justify-between gap-2 mb-1">
-            <div className="flex items-center gap-2">
-              <Wrench className="w-4 h-4 text-green-500" />
-              <span className="text-sm font-medium text-green-500">Fixed by AI</span>
+        {/* AI Fix Result */}
+        {sqlFix && (
+          <div className="px-4 py-3 border-t border-[var(--border)] bg-green-500/5 shrink-0">
+            <div className="flex items-start justify-between gap-2 mb-1">
+              <div className="flex items-center gap-2">
+                <Wrench className="w-4 h-4 text-green-500" />
+                <span className="text-sm font-medium text-green-500">Fixed by AI</span>
+              </div>
+              <button
+                onClick={() => setSqlFix(null)}
+                className="p-1 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] transition-colors"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
             </div>
-            <button
-              onClick={() => setSqlFix(null)}
-              className="p-1 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] transition-colors"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
+            {sqlFix.explanation && (
+              <p className="text-xs text-[var(--text-secondary)] mb-2">{sqlFix.explanation}</p>
+            )}
           </div>
-          {sqlFix.explanation && (
-            <p className="text-xs text-[var(--text-secondary)] mb-2">{sqlFix.explanation}</p>
-          )}
-        </div>
-      )}
+        )}
 
-      {/* AI Explanation */}
-      {sqlExplanation && (
-        <div className="px-4 py-3 border-t border-[var(--border)] bg-[var(--bg-secondary)] shrink-0">
-          <div className="flex items-start justify-between gap-2">
-            <div className="flex items-center gap-2 mb-1">
-              <BookOpen className="w-4 h-4 text-[var(--accent)]" />
-              <span className="text-sm font-medium text-[var(--text-primary)]">AI Explanation</span>
+        {/* AI Explanation */}
+        {sqlExplanation && (
+          <div className="px-4 py-3 border-t border-[var(--border)] bg-[var(--bg-secondary)] shrink-0">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-2 mb-1">
+                <BookOpen className="w-4 h-4 text-[var(--accent)]" />
+                <span className="text-sm font-medium text-[var(--text-primary)]">AI Explanation</span>
+              </div>
+              <button
+                onClick={() => setSqlExplanation("")}
+                className="p-1 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] transition-colors"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
             </div>
-            <button
-              onClick={() => setSqlExplanation("")}
-              className="p-1 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] transition-colors"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
+            <p className="text-sm text-[var(--text-secondary)] leading-relaxed whitespace-pre-wrap">
+              {sqlExplanation}
+            </p>
           </div>
-          <p className="text-sm text-[var(--text-secondary)] leading-relaxed whitespace-pre-wrap">
-            {sqlExplanation}
-          </p>
-        </div>
-      )}
+        )}
 
-      {/* AI Optimization */}
-      {sqlOptimization && (
-        <div className="px-4 py-3 border-t border-[var(--border)] bg-[var(--bg-secondary)] shrink-0">
-          <div className="flex items-start justify-between gap-2 mb-2">
-            <div className="flex items-center gap-2">
-              <Zap className="w-4 h-4 text-yellow-500" />
-              <span className="text-sm font-medium text-yellow-500">Optimization Analysis</span>
+        {/* AI Optimization */}
+        {sqlOptimization && (
+          <div className="px-4 py-3 border-t border-[var(--border)] bg-[var(--bg-secondary)] shrink-0">
+            <div className="flex items-start justify-between gap-2 mb-2">
+              <div className="flex items-center gap-2">
+                <Zap className="w-4 h-4 text-yellow-500" />
+                <span className="text-sm font-medium text-yellow-500">Optimization Analysis</span>
+              </div>
+              <button
+                onClick={() => setSqlOptimization(null)}
+                className="p-1 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] transition-colors"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
             </div>
-            <button
-              onClick={() => setSqlOptimization(null)}
-              className="p-1 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] transition-colors"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
+            {sqlOptimization.optimized_sql && (
+              <div className="mb-2 px-3 py-2 rounded-md bg-[var(--bg-primary)] border border-[var(--border)] font-mono text-xs text-[var(--text-primary)] whitespace-pre-wrap">
+                {sqlOptimization.optimized_sql}
+              </div>
+            )}
+            <p className="text-sm text-[var(--text-secondary)] leading-relaxed whitespace-pre-wrap">
+              {sqlOptimization.suggestions}
+            </p>
           </div>
-          {sqlOptimization.optimized_sql && (
-            <div className="mb-2 px-3 py-2 rounded-md bg-[var(--bg-primary)] border border-[var(--border)] font-mono text-xs text-[var(--text-primary)] whitespace-pre-wrap">
-              {sqlOptimization.optimized_sql}
-            </div>
-          )}
-          <p className="text-sm text-[var(--text-secondary)] leading-relaxed whitespace-pre-wrap">
-            {sqlOptimization.suggestions}
-          </p>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Join Builder Modal */}
       <JoinBuilder
