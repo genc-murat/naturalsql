@@ -38,6 +38,15 @@ pub struct ForeignKeyRelation {
     pub constraint_name: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexInfo {
+    pub name: String,
+    pub column: String,
+    pub non_unique: bool,
+    pub seq: u16,
+    pub index_type: String,
+}
+
 fn get_cache_path() -> PathBuf {
     let dir = dirs_next::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -498,3 +507,405 @@ pub fn find_cross_database_relationships(
 
     relations
 }
+
+// ========================
+// Enhanced metadata helpers
+// ========================
+
+/// Get indexes on a table
+pub async fn get_table_indexes(database: &str, table: &str) -> Result<Vec<IndexInfo>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let indexes = conn
+        .query_map(
+            format!(
+                "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE, SEQ_IN_INDEX, INDEX_TYPE
+                 FROM information_schema.STATISTICS
+                 WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}'
+                 ORDER BY INDEX_NAME, SEQ_IN_INDEX",
+                database, table
+            ),
+            |row: Row| IndexInfo {
+                name: row.get(0).unwrap_or_default(),
+                column: row.get(1).unwrap_or_default(),
+                non_unique: row.get::<u64, _>(2).map(|v| v == 1).unwrap_or(true),
+                seq: row.get(3).unwrap_or(1),
+                index_type: row.get(4).unwrap_or_default(),
+            },
+        )
+        .await?;
+
+    Ok(indexes)
+}
+
+/// Get foreign keys for a table
+pub async fn get_table_foreign_keys(database: &str, table: &str) -> Result<Vec<ForeignKeyRelation>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let fks = conn
+        .query_map(
+            format!(
+                "SELECT
+                    kcu.COLUMN_NAME,
+                    kcu.REFERENCED_TABLE_NAME,
+                    kcu.REFERENCED_COLUMN_NAME,
+                    kcu.CONSTRAINT_NAME,
+                    kcu.REFERENCED_TABLE_SCHEMA
+                 FROM information_schema.KEY_COLUMN_USAGE kcu
+                 WHERE kcu.TABLE_SCHEMA = '{}'
+                     AND kcu.TABLE_NAME = '{}'
+                     AND kcu.REFERENCED_TABLE_NAME IS NOT NULL",
+                database, table
+            ),
+            |row: Row| ForeignKeyRelation {
+                from_database: database.to_string(),
+                from_table: table.to_string(),
+                from_column: row.get(0).unwrap_or_default(),
+                to_database: row.get(4).unwrap_or_default(),
+                to_table: row.get(1).unwrap_or_default(),
+                to_column: row.get(2).unwrap_or_default(),
+                constraint_name: row.get(3),
+            },
+        )
+        .await?;
+
+    Ok(fks)
+}
+
+/// Get all constraints for a table
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConstraintInfo {
+    pub name: String,
+    pub column: String,
+    pub constraint_type: String, // PRIMARY KEY, UNIQUE, FOREIGN KEY, CHECK
+}
+
+pub async fn get_table_constraints(database: &str, table: &str) -> Result<Vec<ConstraintInfo>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let constraints = conn
+        .query_map(
+            format!(
+                "SELECT tc.CONSTRAINT_NAME, kcu.COLUMN_NAME, tc.CONSTRAINT_TYPE
+                 FROM information_schema.TABLE_CONSTRAINTS tc
+                 JOIN information_schema.KEY_COLUMN_USAGE kcu
+                     ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+                     AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA
+                     AND tc.TABLE_NAME = kcu.TABLE_NAME
+                 WHERE tc.TABLE_SCHEMA = '{}' AND tc.TABLE_NAME = '{}'
+                 ORDER BY tc.CONSTRAINT_TYPE, tc.CONSTRAINT_NAME",
+                database, table
+            ),
+            |row: Row| ConstraintInfo {
+                name: row.get(0).unwrap_or_default(),
+                column: row.get(1).unwrap_or_default(),
+                constraint_type: row.get(2).unwrap_or_default(),
+            },
+        )
+        .await?;
+
+    Ok(constraints)
+}
+
+/// Get views in a database
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewInfo {
+    pub name: String,
+    pub definition: String,
+}
+
+pub async fn get_database_views(database: &str) -> Result<Vec<ViewInfo>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let views = conn
+        .query_map(
+            format!(
+                "SELECT TABLE_NAME, VIEW_DEFINITION
+                 FROM information_schema.VIEWS
+                 WHERE TABLE_SCHEMA = '{}'
+                 ORDER BY TABLE_NAME",
+                database
+            ),
+            |row: Row| ViewInfo {
+                name: row.get(0).unwrap_or_default(),
+                definition: row.get::<String, _>(1).unwrap_or_default(),
+            },
+        )
+        .await?;
+
+    Ok(views)
+}
+
+/// Get stored procedures in a database
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcedureInfo {
+    pub name: String,
+    pub definer: String,
+    pub created: String,
+    pub params: String,
+}
+
+pub async fn get_database_procedures(database: &str) -> Result<Vec<ProcedureInfo>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let procs = conn
+        .query_map(
+            format!(
+                "SELECT ROUTINE_NAME, DEFINER, CREATED,
+                        IFNULL(PARAM_LIST, '') as params
+                 FROM information_schema.ROUTINES
+                 WHERE ROUTINE_SCHEMA = '{}' AND ROUTINE_TYPE = 'PROCEDURE'
+                 ORDER BY ROUTINE_NAME",
+                database
+            ),
+            |row: Row| ProcedureInfo {
+                name: row.get(0).unwrap_or_default(),
+                definer: row.get(1).unwrap_or_default(),
+                created: row.get(2).unwrap_or_default(),
+                params: row.get(3).unwrap_or_default(),
+            },
+        )
+        .await?;
+
+    Ok(procs)
+}
+
+/// Get triggers in a database
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriggerInfo {
+    pub name: String,
+    pub table: String,
+    pub event: String,
+    pub timing: String,
+    pub statement: String,
+}
+
+pub async fn get_database_triggers(database: &str) -> Result<Vec<TriggerInfo>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let triggers = conn
+        .query_map(
+            format!(
+                "SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, EVENT_MANIPULATION,
+                        ACTION_TIMING, ACTION_STATEMENT
+                 FROM information_schema.TRIGGERS
+                 WHERE TRIGGER_SCHEMA = '{}'
+                 ORDER BY EVENT_OBJECT_TABLE, ACTION_TIMING",
+                database
+            ),
+            |row: Row| TriggerInfo {
+                name: row.get(0).unwrap_or_default(),
+                table: row.get(1).unwrap_or_default(),
+                event: row.get(2).unwrap_or_default(),
+                timing: row.get(3).unwrap_or_default(),
+                statement: row.get::<String, _>(4).unwrap_or_default(),
+            },
+        )
+        .await?;
+
+    Ok(triggers)
+}
+
+/// Get table statistics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableStats {
+    pub row_count: u64,
+    pub data_size_mb: f64,
+    pub index_size_mb: f64,
+    pub avg_row_length: u64,
+}
+
+pub async fn get_table_statistics(database: &str, table: &str) -> Result<TableStats, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let result: Option<(Option<u64>, Option<f64>, Option<f64>, Option<u64>)> = conn
+        .query_first(
+            format!(
+                "SELECT TABLE_ROWS,
+                        ROUND(DATA_LENGTH / 1024.0 / 1024.0, 2) as data_mb,
+                        ROUND(INDEX_LENGTH / 1024.0 / 1024.0, 2) as index_mb,
+                        AVG_ROW_LENGTH
+                 FROM information_schema.TABLES
+                 WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}'",
+                database, table
+            ),
+        )
+        .await?;
+
+    match result {
+        Some((rows, data_mb, index_mb, avg_len)) => Ok(TableStats {
+            row_count: rows.unwrap_or(0),
+            data_size_mb: data_mb.unwrap_or(0.0),
+            index_size_mb: index_mb.unwrap_or(0.0),
+            avg_row_length: avg_len.unwrap_or(0),
+        }),
+        None => Err(AppError::QueryExecution(format!("Table {}.{} not found", database, table))),
+    }
+}
+
+/// Find columns with the same name across databases (heuristic FK discovery)
+pub async fn find_similar_columns(column_pattern: &str) -> Result<Vec<ColumnLocation>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let locations = conn
+        .query_map(
+            format!(
+                "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, COLUMN_KEY
+                 FROM information_schema.COLUMNS
+                 WHERE COLUMN_NAME LIKE '%{}%'
+                 ORDER BY TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME",
+                column_pattern
+            ),
+            |row: Row| ColumnLocation {
+                database: row.get(0).unwrap_or_default(),
+                table: row.get(1).unwrap_or_default(),
+                column: row.get(2).unwrap_or_default(),
+                column_type: row.get(3).unwrap_or_default(),
+                column_key: row.get(4).unwrap_or_default(),
+            },
+        )
+        .await?;
+
+    Ok(locations)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColumnLocation {
+    pub database: String,
+    pub table: String,
+    pub column: String,
+    pub column_type: String,
+    pub column_key: String,
+}
+
+/// Compare two tables' structures
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableComparison {
+    pub left_only: Vec<String>,
+    pub right_only: Vec<String>,
+    pub common: Vec<String>,
+    pub type_mismatches: Vec<(String, String, String)>, // column, left_type, right_type
+}
+
+pub fn compare_tables(
+    left_schema: Option<&TableInfo>,
+    right_schema: Option<&TableInfo>,
+) -> TableComparison {
+    let mut result = TableComparison {
+        left_only: Vec::new(),
+        right_only: Vec::new(),
+        common: Vec::new(),
+        type_mismatches: Vec::new(),
+    };
+
+    let empty_cols = Vec::new();
+    let left_cols = left_schema.map_or(&empty_cols, |t| &t.columns);
+    let right_cols = right_schema.map_or(&empty_cols, |t| &t.columns);
+
+    let left_names: std::collections::HashSet<_> = left_cols.iter().map(|c| &c.name).collect();
+    let right_names: std::collections::HashSet<_> = right_cols.iter().map(|c| &c.name).collect();
+
+    result.left_only = left_names.difference(&right_names).map(|s| s.to_string()).collect();
+    result.right_only = right_names.difference(&left_names).map(|s| s.to_string()).collect();
+    result.common = left_names.intersection(&right_names).map(|s| s.to_string()).collect();
+
+    // Check type mismatches for common columns
+    for col_name in &result.common {
+        if let (Some(left_col), Some(right_col)) = (
+            left_cols.iter().find(|c| &c.name == col_name),
+            right_cols.iter().find(|c| &c.name == col_name),
+        ) {
+            if left_col.column_type != right_col.column_type {
+                result.type_mismatches.push((
+                    col_name.clone(),
+                    left_col.column_type.clone(),
+                    right_col.column_type.clone(),
+                ));
+            }
+        }
+    }
+
+    result
+}
+
+/// Get MySQL server information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerInfo {
+    pub version: String,
+    pub current_user: String,
+    pub current_database: String,
+    pub character_set: String,
+    pub collation: String,
+    pub timezone: String,
+    pub max_connections: u64,
+}
+
+pub async fn get_server_info() -> Result<ServerInfo, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let version: String = conn.query_first("SELECT VERSION()").await?.unwrap_or_default();
+    let current_user: String = conn.query_first("SELECT CURRENT_USER()").await?.unwrap_or_default();
+    let current_database: String = conn.query_first("SELECT DATABASE()").await?.unwrap_or_default();
+    let character_set: String = conn.query_first("SELECT @@character_set_server").await?.unwrap_or_default();
+    let collation: String = conn.query_first("SELECT @@collation_server").await?.unwrap_or_default();
+    let timezone: String = conn.query_first("SELECT @@system_time_zone").await?.unwrap_or_default();
+    let max_connections: u64 = conn.query_first("SELECT @@max_connections").await?.unwrap_or(151);
+
+    Ok(ServerInfo {
+        version,
+        current_user,
+        current_database,
+        character_set,
+        collation,
+        timezone,
+        max_connections,
+    })
+}
+
+/// Get table status information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableStatus {
+    pub engine: String,
+    pub row_format: String,
+    pub collation: String,
+    pub auto_increment: Option<u64>,
+    pub create_time: Option<String>,
+    pub update_time: Option<String>,
+}
+
+pub async fn get_table_status(database: &str, table: &str) -> Result<TableStatus, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let rows: Vec<Row> = conn
+        .exec(format!(
+            "SELECT Engine, Row_format, Collation, Auto_increment, Create_time, Update_time
+             FROM information_schema.TABLES
+             WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}'",
+            database, table
+        ), ())
+        .await?;
+
+    if let Some(row) = rows.into_iter().next() {
+        Ok(TableStatus {
+            engine: row.get(0).unwrap_or_default(),
+            row_format: row.get(1).unwrap_or_default(),
+            collation: row.get(2).unwrap_or_default(),
+            auto_increment: row.get(3),
+            create_time: row.get(4),
+            update_time: row.get(5),
+        })
+    } else {
+        Err(AppError::QueryExecution(format!("Table {}.{} not found", database, table)))
+    }
+}
+

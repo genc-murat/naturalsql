@@ -2,11 +2,21 @@ use mysql_async::prelude::Queryable;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::db::schema::{self, Schema};
 use crate::error::AppError;
 use crate::config;
+
+/// Structured record of a single tool call
+#[derive(Debug, Clone)]
+pub struct ToolCallStep {
+    pub tool_name: String,
+    pub parameters: HashMap<String, String>,
+    pub result: String,
+    pub iteration: u32,
+}
 
 /// Fallback: single-prompt approach (use when schema is already small)
 #[allow(dead_code)]
@@ -73,10 +83,11 @@ pub async fn natural_language_to_sql(
 
 /// Manual JSON-based tool calling for schema discovery
 /// Works with models that don't support native function calling
+/// Returns: (sql, tool_steps, iterations_used)
 pub async fn natural_language_to_sql_with_tools(
     natural_language: &str,
     all_schemas: &[Schema],
-) -> Result<String, AppError> {
+) -> Result<(String, Vec<ToolCallStep>, u32), AppError> {
     let url = config::get_llm_url().await;
     let model = config::get_llm_model().await;
 
@@ -113,35 +124,42 @@ pub async fn natural_language_to_sql_with_tools(
     let mut seen_tool_calls: Vec<String> = Vec::new();
     let mut conversation = String::new();
     let mut schemas_explored: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut tool_steps: Vec<ToolCallStep> = Vec::new();
 
     for iteration in 0..max_iterations {
         eprintln!("[LLM] Tool iteration {}/{}", iteration + 1, max_iterations);
 
         let exploration_guidance = if schemas_explored.len() >= 2 {
-            "You have schema for 2+ tables. Write the SQL query NOW. Do NOT call list_tables or more get_table_schema calls.\n"
+            let tables_list = schemas_explored.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+            format!("You already have schema for: {tables_list}. Write the SQL query NOW. Do NOT call any more schema tools.\n")
+        } else if schemas_explored.len() == 1 {
+            let table_name = schemas_explored.iter().next().unwrap();
+            format!("You already have schema for {table_name}. Get the SECOND table's schema with get_table_schema, or use cross_db_join. Do NOT call get_indexes or get_foreign_keys — you don't need them to write SQL.\n")
         } else {
-            "RULE: You MUST call get_table_schema for each table BEFORE writing SQL. NEVER guess column names. Always use get_table_schema first.\n"
+            "RULE: You MUST call get_table_schema for each table BEFORE writing SQL. NEVER guess column names. Always use get_table_schema first.\n".to_string()
         };
 
-        let tools_description = if has_cross_db_relations {
-            format!(
-                "You have access to tools. Use them by outputting a JSON object:\n\
-                 - {{\"tool\": \"list_tables\", \"database\": \"<db_name>\"}}\n\
-                 - {{\"tool\": \"get_table_schema\", \"database\": \"<db_name>\", \"table\": \"<table_name>\"}}\n\
-                 - {{\"tool\": \"cross_db_join\", \"left_table\": \"db1.table1\", \"right_table\": \"db2.table2\", \"join_type\": \"INNER JOIN\"}}\n\n\
-                 For cross-database JOINs, use the format: database.table\n\
-                 Known relationships exist between some tables in different databases.\n\
-                 {exploration_guidance}"
-            )
-        } else {
-            format!(
-                "You have access to tools. Use them by outputting a JSON object:\n\
-                 - {{\"tool\": \"list_tables\", \"database\": \"<db_name>\"}}\n\
-                 - {{\"tool\": \"get_table_schema\", \"database\": \"<db_name>\", \"table\": \"<table_name>\"}}\n\n\
-                 For cross-database JOINs, use the format: database.table\n\
-                 {exploration_guidance}"
-            )
-        };
+        let tools_description = format!(
+            "You have access to tools. Use them by outputting a JSON object:\n\
+             Core (for writing SQL):\n\
+             - {{\"tool\": \"list_tables\", \"database\": \"<db_name>\"}}\n\
+             - {{\"tool\": \"get_table_schema\", \"database\": \"<db_name>\", \"table\": \"<table_name>\"}}\n\
+             - {{\"tool\": \"cross_db_join\", \"left_table\": \"db1.table1\", \"right_table\": \"db2.table2\", \"join_type\": \"INNER JOIN\"}}\n\
+             Auxiliary (use only when needed for indexes/FK/stats):\n\
+             - {{\"tool\": \"get_indexes\", \"database\": \"<db_name>\", \"table\": \"<table_name>\"}}\n\
+             - {{\"tool\": \"get_foreign_keys\", \"database\": \"<db_name>\", \"table\": \"<table_name>\"}}\n\
+             - {{\"tool\": \"get_constraints\", \"database\": \"<db_name>\", \"table\": \"<table_name>\"}}\n\
+             - {{\"tool\": \"list_views\", \"database\": \"<db_name>\"}}\n\
+             - {{\"tool\": \"list_procedures\", \"database\": \"<db_name>\"}}\n\
+             - {{\"tool\": \"find_relationships\", \"from_database\": \"<db>\", \"to_database\": \"<db>\"}}\n\
+             - {{\"tool\": \"find_similar_columns\", \"column_pattern\": \"user_id\"}}\n\
+             - {{\"tool\": \"compare_tables\", \"left\": \"db1.table1\", \"right\": \"db2.table1\"}}\n\
+             - {{\"tool\": \"explain_query\", \"sql\": \"SELECT ...\"}}\n\
+             - {{\"tool\": \"security_check\", \"sql\": \"SELECT ...\"}}\n\
+             - {{\"tool\": \"validate_sql\", \"sql\": \"SELECT ...\"}}\n\
+             - {{\"tool\": \"get_server_info\"}}\n\
+             {exploration_guidance}"
+        );
 
         let prompt = format!(
             "You are a MySQL expert. Available databases: {db_list}\n\n\
@@ -193,11 +211,37 @@ pub async fn natural_language_to_sql_with_tools(
         let mut tool_continued = false;
 
         if let Ok(tool_call) = serde_json::from_str::<serde_json::Value>(&text) {
-            if let Some(tool_name) = tool_call.get("tool").and_then(|v| v.as_str()) {
-                let call_sig = tool_call.to_string();
+            if let Some(raw_tool_name) = tool_call.get("tool").and_then(|v| v.as_str()) {
+                // Normalize tool name for tracking (handles aliases/typos)
+                let normalized_name = match raw_tool_name {
+                    "list_indexes" | "get_index" | "show_indexes" => "get_indexes",
+                    "list_foreign_keys" | "get_fk" => "get_foreign_keys",
+                    "show_constraints" => "get_constraints",
+                    "show_views" => "list_views",
+                    "show_procedures" => "list_procedures",
+                    "show_triggers" => "list_triggers",
+                    "get_stats" => "get_table_stats",
+                    "show_table_status" => "get_table_status",
+                    "get_info" => "get_server_info",
+                    "explain" => "explain_query",
+                    "check_security" => "security_check",
+                    "validate" => "validate_sql",
+                    "find_similar" => "find_similar_columns",
+                    "compare" => "compare_tables",
+                    "join" => "cross_db_join",
+                    _ => raw_tool_name,
+                };
+
+                // Build a normalized signature for repeat detection
+                let mut normalized_call = tool_call.clone();
+                if let Some(obj) = normalized_call.as_object_mut() {
+                    obj.insert("tool".to_string(), serde_json::json!(normalized_name));
+                }
+                let call_sig = normalized_call.to_string();
+
                 if seen_tool_calls.contains(&call_sig) {
                     // Repeated call → fallback with ALL schemas for complete context
-                    eprintln!("[LLM] Repeated tool call, falling back with all schemas");
+                    eprintln!("[LLM] Repeated tool call ({normalized_name}), falling back with all schemas");
                     let schema_context = if has_cross_db_relations {
                         schema::format_schemas_with_relationships(all_schemas, &cross_db_relations)
                     } else {
@@ -211,12 +255,12 @@ pub async fn natural_language_to_sql_with_tools(
                          User's question: {natural_language}\n\n\
                          SQL Query:",
                     );
-                    return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt).await;
+                    return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt).await.map(|sql| (sql, tool_steps, (iteration + 1) as u32));
                 }
                 seen_tool_calls.push(call_sig);
 
-                if let Some(sql) = process_tool_call(
-                    tool_name,
+                let (maybe_sql, mut step) = process_tool_call(
+                    normalized_name,
                     &tool_call,
                     all_schemas,
                     &db_list,
@@ -227,14 +271,18 @@ pub async fn natural_language_to_sql_with_tools(
                     &model,
                     &client,
                     &api_url,
-                ).await? {
+                ).await?;
+                step.iteration = (iteration + 1) as u32;
+                tool_steps.push(step);
+
+                if let Some(sql) = maybe_sql {
                     eprintln!("[LLM] Tool returned SQL directly");
-                    return Ok(sql);
+                    return Ok((sql, tool_steps, iteration as u32 + 1));
                 }
                 tool_continued = true;
 
                 // Track which tables have been explored
-                if tool_name == "get_table_schema" {
+                if normalized_name == "get_table_schema" {
                     if let Some(db) = tool_call.get("database").and_then(|v| v.as_str()) {
                         if let Some(table) = tool_call.get("table").and_then(|v| v.as_str()) {
                             schemas_explored.insert(format!("{db}.{table}"));
@@ -248,10 +296,34 @@ pub async fn natural_language_to_sql_with_tools(
         // If not parsed as whole JSON, try extracting from mixed content
         if !tool_continued {
             if let Some(tool_call) = extract_first_json_object(&text) {
-                if let Some(tool_name) = tool_call.get("tool").and_then(|v| v.as_str()) {
-                    let call_sig = tool_call.to_string();
+                if let Some(raw_tool_name) = tool_call.get("tool").and_then(|v| v.as_str()) {
+                    let normalized_name = match raw_tool_name {
+                        "list_indexes" | "get_index" | "show_indexes" => "get_indexes",
+                        "list_foreign_keys" | "get_fk" => "get_foreign_keys",
+                        "show_constraints" => "get_constraints",
+                        "show_views" => "list_views",
+                        "show_procedures" => "list_procedures",
+                        "show_triggers" => "list_triggers",
+                        "get_stats" => "get_table_stats",
+                        "show_table_status" => "get_table_status",
+                        "get_info" => "get_server_info",
+                        "explain" => "explain_query",
+                        "check_security" => "security_check",
+                        "validate" => "validate_sql",
+                        "find_similar" => "find_similar_columns",
+                        "compare" => "compare_tables",
+                        "join" => "cross_db_join",
+                        _ => raw_tool_name,
+                    };
+
+                    let mut normalized_call = tool_call.clone();
+                    if let Some(obj) = normalized_call.as_object_mut() {
+                        obj.insert("tool".to_string(), serde_json::json!(normalized_name));
+                    }
+                    let call_sig = normalized_call.to_string();
+
                     if seen_tool_calls.contains(&call_sig) {
-                        eprintln!("[LLM] Repeated tool call (extracted), falling back with all schemas");
+                        eprintln!("[LLM] Repeated tool call (extracted, {normalized_name}), falling back with all schemas");
                         let schema_context = if has_cross_db_relations {
                             schema::format_schemas_with_relationships(all_schemas, &cross_db_relations)
                         } else {
@@ -265,12 +337,12 @@ pub async fn natural_language_to_sql_with_tools(
                              User's question: {natural_language}\n\n\
                              SQL Query:",
                         );
-                        return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt).await;
+                        return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt).await.map(|sql| (sql, tool_steps.clone(), (iteration + 1) as u32));
                     }
                     seen_tool_calls.push(call_sig);
 
-                    if let Some(sql) = process_tool_call(
-                        tool_name,
+                    let (maybe_sql, mut step) = process_tool_call(
+                        normalized_name,
                         &tool_call,
                         all_schemas,
                         &db_list,
@@ -281,14 +353,18 @@ pub async fn natural_language_to_sql_with_tools(
                         &model,
                         &client,
                         &api_url,
-                    ).await? {
+                    ).await?;
+                    step.iteration = (iteration + 1) as u32;
+                    tool_steps.push(step);
+
+                    if let Some(sql) = maybe_sql {
                         eprintln!("[LLM] Tool returned SQL directly");
-                        return Ok(sql);
+                        return Ok((sql, tool_steps, iteration as u32 + 1));
                     }
                     tool_continued = true;
 
                     // Track which tables have been explored
-                    if tool_name == "get_table_schema" {
+                    if normalized_name == "get_table_schema" {
                         if let Some(db) = tool_call.get("database").and_then(|v| v.as_str()) {
                             if let Some(table) = tool_call.get("table").and_then(|v| v.as_str()) {
                                 schemas_explored.insert(format!("{db}.{table}"));
@@ -313,7 +389,7 @@ pub async fn natural_language_to_sql_with_tools(
             if schemas_explored.is_empty() && !all_schemas.is_empty() {
                 match validate_sql_columns(&sql, all_schemas) {
                     ValidationResult::Valid => {
-                        return Ok(sql);
+                        return Ok((sql, tool_steps.clone(), (iteration + 1) as u32));
                     }
                     ValidationResult::InvalidColumns { table, bad_columns } => {
                         eprintln!("[LLM] SQL validation failed: table '{}' has no columns: {:?}", table, bad_columns);
@@ -332,16 +408,16 @@ pub async fn natural_language_to_sql_with_tools(
                              User's question: {natural_language}\n\n\
                              SQL Query:",
                         );
-                        return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt).await;
+                        return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt).await.map(|sql| (sql, tool_steps.clone(), (iteration + 1) as u32));
                     }
                     ValidationResult::TableNotFound => {
                         // Table not in cache, let it through (might be valid)
-                        return Ok(sql);
+                        return Ok((sql, tool_steps.clone(), (iteration + 1) as u32));
                     }
                 }
             }
 
-            return Ok(sql);
+            return Ok((sql, tool_steps.clone(), (iteration + 1) as u32));
         }
 
         // No valid SQL — fallback with ALL schemas
@@ -359,7 +435,7 @@ pub async fn natural_language_to_sql_with_tools(
              User's question: {natural_language}\n\n\
              SQL Query:",
         );
-        return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt).await;
+        return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt).await.map(|sql| (sql, tool_steps.clone(), (iteration + 1) as u32));
     }
 
     // Max iterations → fallback with all schemas
@@ -369,7 +445,8 @@ pub async fn natural_language_to_sql_with_tools(
     } else {
         schema::format_all_schemas_for_prompt(all_schemas)
     };
-    natural_language_to_sql(natural_language, &schema_context).await
+    let sql = natural_language_to_sql(natural_language, &schema_context).await?;
+    Ok((sql, tool_steps, max_iterations as u32))
 }
 
 async fn call_ollama_generate(
@@ -459,8 +536,31 @@ async fn process_tool_call(
     _model: &str,
     _client: &reqwest::Client,
     _api_url: &str,
-) -> Result<Option<String>, AppError> {
+) -> Result<(Option<String>, ToolCallStep), AppError> {
     eprintln!("[LLM] Tool call: {tool_name}");
+
+    // Handle common tool name aliases/typos from LLM
+    let tool_name = match tool_name {
+        "list_indexes" => "get_indexes",
+        "get_index" => "get_indexes",
+        "list_foreign_keys" => "get_foreign_keys",
+        "get_fk" => "get_foreign_keys",
+        "show_indexes" => "get_indexes",
+        "show_constraints" => "get_constraints",
+        "show_views" => "list_views",
+        "show_procedures" => "list_procedures",
+        "show_triggers" => "list_triggers",
+        "get_stats" => "get_table_stats",
+        "show_table_status" => "get_table_status",
+        "get_info" => "get_server_info",
+        "explain" => "explain_query",
+        "check_security" => "security_check",
+        "validate" => "validate_sql",
+        "find_similar" => "find_similar_columns",
+        "compare" => "compare_tables",
+        "join" => "cross_db_join",
+        _ => tool_name,
+    };
 
     match tool_name {
         "list_tables" => {
@@ -550,47 +650,6 @@ async fn process_tool_call(
                 Err(e) => {
                     conversation.push_str(&format!("\n\nTool result: Not connected: {e}"));
                 }
-            }
-        }
-        "find_relationships" => {
-            let from_db = tool_call.get("from_database").and_then(|v| v.as_str()).unwrap_or("");
-            let to_db = tool_call.get("to_database").and_then(|v| v.as_str()).unwrap_or("");
-
-            // Filter relations for the requested databases
-            let relevant_relations: Vec<_> = cross_db_relations
-                .iter()
-                .filter(|r| {
-                    (from_db.is_empty() || r.from_database == from_db || r.to_database == from_db)
-                        && (to_db.is_empty() || r.from_database == to_db || r.to_database == to_db)
-                })
-                .collect();
-
-            if relevant_relations.is_empty() {
-                // If no cross-db relations found, show intra-database FK relations hint
-                let result = if from_db.is_empty() && to_db.is_empty() {
-                    format!("No cross-database relationships found between any databases. Available databases: {}", db_list)
-                } else {
-                    format!("No relationships found between '{}' and '{}'. Available databases: {}", from_db, to_db, db_list)
-                };
-                conversation.push_str(&format!("\n\nTool result: {result}"));
-                eprintln!("[LLM] {result}");
-            } else {
-                let relations_str: Vec<String> = relevant_relations
-                    .iter()
-                    .map(|r| {
-                        format!(
-                            "{}.{}.{} → {}.{}.{}",
-                            r.from_database, r.from_table, r.from_column,
-                            r.to_database, r.to_table, r.to_column
-                        )
-                    })
-                    .collect();
-                let result = format!(
-                    "Relationships found:\n{}",
-                    relations_str.join("\n")
-                );
-                conversation.push_str(&format!("\n\nTool result:\n{result}"));
-                eprintln!("[LLM] {}", result.chars().take(200).collect::<String>());
             }
         }
         "cross_db_join" => {
@@ -684,7 +743,16 @@ async fn process_tool_call(
 
                             // Return SQL directly if it's a clean join (no comment about missing columns)
                             if !join_suggestions.starts_with("--") {
-                                return Ok(Some(sql));
+                                let mut params = HashMap::new();
+                                params.insert("left_table".to_string(), left_table.to_string());
+                                params.insert("right_table".to_string(), right_table.to_string());
+                                params.insert("join_type".to_string(), join_type.to_string());
+                                return Ok((Some(sql), ToolCallStep {
+                                    tool_name: tool_name.to_string(),
+                                    parameters: params,
+                                    result: result.chars().take(500).collect(),
+                                    iteration: 0,
+                                }));
                             }
                         }
                     }
@@ -702,11 +770,438 @@ async fn process_tool_call(
                 }
             }
         }
+
+        "get_indexes" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            match schema::get_table_indexes(database, table).await {
+                Ok(indexes) if indexes.is_empty() => {
+                    conversation.push_str(&format!("\n\nTool result: No indexes on {database}.{table}"));
+                }
+                Ok(indexes) => {
+                    let lines: Vec<String> = indexes.iter().map(|i| {
+                        format!("  {} ({}): {} [{}]", i.name, if i.non_unique { "NON-UNIQUE" } else { "UNIQUE" }, i.column, i.index_type)
+                    }).collect();
+                    let result = format!("Indexes on {database}.{table}:\n{}", lines.join("\n"));
+                    conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "get_foreign_keys" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            match schema::get_table_foreign_keys(database, table).await {
+                Ok(fks) if fks.is_empty() => {
+                    conversation.push_str(&format!("\n\nTool result: No foreign keys on {database}.{table}"));
+                }
+                Ok(fks) => {
+                    let lines: Vec<String> = fks.iter().map(|f| {
+                        format!("  {}.{} → {}.{} [{}]", f.to_database, f.to_table, f.to_column, f.from_column, f.constraint_name.as_deref().unwrap_or("unnamed"))
+                    }).collect();
+                    let result = format!("Foreign keys on {database}.{table}:\n{}", lines.join("\n"));
+                    conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "get_constraints" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            match schema::get_table_constraints(database, table).await {
+                Ok(constraints) if constraints.is_empty() => {
+                    conversation.push_str(&format!("\n\nTool result: No constraints on {database}.{table}"));
+                }
+                Ok(constraints) => {
+                    let lines: Vec<String> = constraints.iter().map(|c| {
+                        format!("  {} ({}) on {}", c.constraint_type, c.name, c.column)
+                    }).collect();
+                    let result = format!("Constraints on {database}.{table}:\n{}", lines.join("\n"));
+                    conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "list_views" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            match schema::get_database_views(database).await {
+                Ok(views) if views.is_empty() => {
+                    conversation.push_str(&format!("\n\nTool result: No views in {database}"));
+                }
+                Ok(views) => {
+                    let names: Vec<&str> = views.iter().map(|v| v.name.as_str()).collect();
+                    let result = format!("Views in {database}: {}", names.join(", "));
+                    conversation.push_str(&format!("\n\nTool result: {result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "list_procedures" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            match schema::get_database_procedures(database).await {
+                Ok(procs) if procs.is_empty() => {
+                    conversation.push_str(&format!("\n\nTool result: No procedures in {database}"));
+                }
+                Ok(procs) => {
+                    let names: Vec<&str> = procs.iter().map(|p| p.name.as_str()).collect();
+                    let result = format!("Procedures in {database}: {}", names.join(", "));
+                    conversation.push_str(&format!("\n\nTool result: {result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "list_triggers" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            match schema::get_database_triggers(database).await {
+                Ok(triggers) if triggers.is_empty() => {
+                    conversation.push_str(&format!("\n\nTool result: No triggers in {database}"));
+                }
+                Ok(triggers) => {
+                    let lines: Vec<String> = triggers.iter().map(|t| {
+                        format!("  {} on {database}.{} [{} {}]", t.name, t.table, t.timing, t.event)
+                    }).collect();
+                    let result = format!("Triggers in {database}:\n{}", lines.join("\n"));
+                    conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "get_table_stats" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            match schema::get_table_statistics(database, table).await {
+                Ok(stats) => {
+                    let result = format!(
+                        "Stats for {database}.{table}: {} rows, {} MB data, {} MB indexes, {} avg row bytes",
+                        stats.row_count, stats.data_size_mb, stats.index_size_mb, stats.avg_row_length
+                    );
+                    conversation.push_str(&format!("\n\nTool result: {result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "get_table_status" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            match schema::get_table_status(database, table).await {
+                Ok(status) => {
+                    let result = format!(
+                        "Status for {database}.{table}: engine={}, row_format={}, collation={}, auto_increment={}",
+                        status.engine, status.row_format, status.collation,
+                        status.auto_increment.map(|v| v.to_string()).unwrap_or("none".to_string())
+                    );
+                    conversation.push_str(&format!("\n\nTool result: {result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "find_relationships" => {
+            let from_db = tool_call.get("from_database").and_then(|v| v.as_str()).unwrap_or("");
+            let to_db = tool_call.get("to_database").and_then(|v| v.as_str()).unwrap_or("");
+
+            // Try actual FK first
+            let mut fk_relations = Vec::new();
+            if !from_db.is_empty() {
+                if let Ok(rels) = schema::introspect_foreign_keys(from_db).await {
+                    fk_relations.extend(rels);
+                }
+            }
+            if !to_db.is_empty() && to_db != from_db {
+                if let Ok(rels) = schema::introspect_foreign_keys(to_db).await {
+                    fk_relations.extend(rels);
+                }
+            }
+
+            // Filter and format
+            let relevant: Vec<_> = fk_relations.iter()
+                .filter(|r| {
+                    (from_db.is_empty() || r.from_database == from_db || r.to_database == from_db)
+                        && (to_db.is_empty() || r.from_database == to_db || r.to_database == to_db)
+                })
+                .collect();
+
+            if relevant.is_empty() {
+                conversation.push_str(&format!("\n\nTool result: No relationships found between '{}' and '{}'. Available: {}", from_db, to_db, db_list));
+            } else {
+                let lines: Vec<String> = relevant.iter().map(|r| {
+                    format!("{}.{}.{} → {}.{}.{}", r.from_database, r.from_table, r.from_column, r.to_database, r.to_table, r.to_column)
+                }).collect();
+                conversation.push_str(&format!("\n\nTool result:\n{}", lines.join("\n")));
+            }
+        }
+
+        "find_similar_columns" => {
+            let pattern = tool_call.get("column_pattern").and_then(|v| v.as_str()).unwrap_or("");
+            match schema::find_similar_columns(pattern).await {
+                Ok(locations) if locations.is_empty() => {
+                    conversation.push_str(&format!("\n\nTool result: No columns matching '{}'", pattern));
+                }
+                Ok(locations) => {
+                    let lines: Vec<String> = locations.iter().take(50).map(|l| {
+                        let key = if !l.column_key.is_empty() { format!(" [{}]", l.column_key) } else { "".to_string() };
+                        format!("  {}.{}.{} {}{}", l.database, l.table, l.column, l.column_type, key)
+                    }).collect();
+                    let total_note = if locations.len() > 50 {
+                        format!("\n... and {} more", locations.len() - 50)
+                    } else { "".to_string() };
+                    let result = format!("Columns matching '{}':\n{}{}", pattern, lines.join("\n"), total_note);
+                    conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "compare_tables" => {
+            let left = tool_call.get("left").and_then(|v| v.as_str()).unwrap_or("");
+            let right = tool_call.get("right").and_then(|v| v.as_str()).unwrap_or("");
+
+            let left_parts: Vec<&str> = left.splitn(2, '.').collect();
+            let right_parts: Vec<&str> = right.splitn(2, '.').collect();
+
+            if left_parts.len() != 2 || right_parts.len() != 2 {
+                conversation.push_str(&format!("\n\nTool error: Tables must be in database.table format. Got: '{left}' and '{right}'"));
+            } else {
+                let left_schema = all_schemas.iter().find(|s| s.database == left_parts[0]).and_then(|s| s.tables.iter().find(|t| t.name == left_parts[1]));
+                let right_schema = all_schemas.iter().find(|s| s.database == right_parts[0]).and_then(|s| s.tables.iter().find(|t| t.name == right_parts[1]));
+
+                let comp = schema::compare_tables(left_schema, right_schema);
+
+                let lines = vec![
+                    format!("Common columns ({}): {}", comp.common.len(), comp.common.join(", ")),
+                    format!("Only in {left} ({}): {}", comp.left_only.len(), comp.left_only.join(", ")),
+                    format!("Only in {right} ({}): {}", comp.right_only.len(), comp.right_only.join(", ")),
+                ];
+
+                let type_mismatch = if !comp.type_mismatches.is_empty() {
+                    let mismatch_lines: Vec<String> = comp.type_mismatches.iter().map(|(c, l, r)| {
+                        format!("  {}: {} vs {}", c, l, r)
+                    }).collect();
+                    format!("Type mismatches:\n{}", mismatch_lines.join("\n"))
+                } else { "".to_string() };
+
+                let result = format!("Compare {left} vs {right}:\n{}\n{}", lines.join("\n"), type_mismatch);
+                conversation.push_str(&format!("\n\nTool result:\n{result}"));
+            }
+        }
+
+        "explain_query" => {
+            let sql = tool_call.get("sql").and_then(|v| v.as_str()).unwrap_or("");
+            if sql.trim().is_empty() {
+                conversation.push_str(&format!("\n\nTool error: sql parameter is required"));
+            } else {
+                match crate::db::connection::get_pool().await {
+                    Ok(pool) => {
+                        match pool.get_conn().await {
+                            Ok(mut conn) => {
+                                let explain_sql = format!("EXPLAIN {}", sql);
+                                match conn.query::<mysql_async::Row, _>(&explain_sql).await {
+                                    Ok(rows) if !rows.is_empty() => {
+                                        let cols = rows[0].columns();
+                                        let col_names: Vec<String> = cols.iter().map(|c| c.name_str().to_string()).collect();
+                                        let formatted: Vec<String> = rows.iter().take(5).map(|row| {
+                                            let vals: Vec<String> = col_names.iter().enumerate().map(|(i, _)| {
+                                                row.get_opt::<mysql_async::Value, usize>(i)
+                                                    .map(|v| match v {
+                                                        Ok(mysql_async::Value::NULL) => "NULL".to_string(),
+                                                        Ok(mysql_async::Value::Bytes(b)) => String::from_utf8_lossy(&b).to_string(),
+                                                        Ok(mysql_async::Value::Int(v)) => v.to_string(),
+                                                        Ok(mysql_async::Value::UInt(v)) => v.to_string(),
+                                                        _ => "NULL".to_string(),
+                                                    })
+                                                    .unwrap_or("NULL".to_string())
+                                            }).collect();
+                                            vals.join(" | ")
+                                        }).collect();
+                                        let result = format!(
+                                            "EXPLAIN for query (columns: {}):\n{}",
+                                            col_names.join(", "),
+                                            formatted.join("\n")
+                                        );
+                                        conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                                    }
+                                    Ok(_) => {
+                                        conversation.push_str(&format!("\n\nTool result: EXPLAIN returned no rows (query may be invalid)"));
+                                    }
+                                    Err(e) => {
+                                        conversation.push_str(&format!("\n\nTool result: EXPLAIN error: {}", e));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                conversation.push_str(&format!("\n\nTool result: Connection error: {e}"));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        conversation.push_str(&format!("\n\nTool result: Not connected: {e}"));
+                    }
+                }
+            }
+        }
+
+        "security_check" => {
+            let sql = tool_call.get("sql").and_then(|v| v.as_str()).unwrap_or("");
+            if sql.trim().is_empty() {
+                conversation.push_str(&format!("\n\nTool error: sql parameter is required"));
+            } else {
+                let upper = sql.to_uppercase();
+                let mut issues: Vec<String> = Vec::new();
+
+                // Check for SELECT *
+                if upper.contains("SELECT *") || upper.contains("SELECT  *") {
+                    issues.push("WARNING: SELECT * - specify columns explicitly for better performance and security".to_string());
+                }
+
+                // Check for UPDATE/DELETE without WHERE
+                if (upper.starts_with("UPDATE") || upper.contains(" UPDATE ")) && !upper.contains("WHERE") {
+                    issues.push("CRITICAL: UPDATE without WHERE clause - will modify ALL rows".to_string());
+                }
+                if (upper.starts_with("DELETE") || upper.contains(" DELETE ")) && !upper.contains("WHERE") && !upper.contains("TRUNCATE") {
+                    issues.push("CRITICAL: DELETE without WHERE clause - will delete ALL rows".to_string());
+                }
+
+                // Check for UNION
+                if upper.contains("UNION") {
+                    issues.push("INFO: UNION detected - verify this is intentional, not an injection vector".to_string());
+                }
+
+                // Check for string concatenation patterns (potential injection)
+                if sql.contains("CONCAT(") || sql.contains("||") {
+                    issues.push("INFO: String concatenation detected - ensure input sanitization".to_string());
+                }
+
+                // Check for DROP/TRUNCATE
+                if upper.contains("DROP ") || upper.contains("TRUNCATE ") {
+                    issues.push("CRITICAL: Destructive operation (DROP/TRUNCATE) detected - irreversible data loss".to_string());
+                }
+
+                // Check for implicit cross join
+                if upper.contains("FROM") && upper.contains("WHERE") && !upper.contains("JOIN") {
+                    let from_idx = upper.find("FROM").unwrap();
+                    let where_idx = upper.find("WHERE").unwrap();
+                    let between = &upper[from_idx..where_idx];
+                    if between.contains(',') {
+                        issues.push("WARNING: Implicit cross join (comma-separated tables) - use explicit JOIN syntax".to_string());
+                    }
+                }
+
+                if issues.is_empty() {
+                    conversation.push_str(&format!("\n\nTool result: SECURITY OK - no issues found"));
+                } else {
+                    conversation.push_str(&format!("\n\nTool result:\n{}", issues.join("\n")));
+                }
+            }
+        }
+
+        "validate_sql" => {
+            let sql = tool_call.get("sql").and_then(|v| v.as_str()).unwrap_or("");
+            if sql.trim().is_empty() {
+                conversation.push_str(&format!("\n\nTool error: sql parameter is required"));
+            } else {
+                match crate::db::connection::get_pool().await {
+                    Ok(pool) => {
+                        match pool.get_conn().await {
+                            Ok(mut conn) => {
+                                let explain_sql = format!("EXPLAIN {}", sql);
+                                match conn.query::<mysql_async::Row, _>(&explain_sql).await {
+                                    Ok(_) => {
+                                        conversation.push_str(&format!("\n\nTool result: SQL is valid - syntax OK"));
+                                    }
+                                    Err(e) => {
+                                        let error_msg = e.to_string();
+                                        conversation.push_str(&format!("\n\nTool result: SQL INVALID - {}", error_msg.chars().take(200).collect::<String>()));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                conversation.push_str(&format!("\n\nTool result: Connection error: {e}"));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        conversation.push_str(&format!("\n\nTool result: Not connected: {e}"));
+                    }
+                }
+            }
+        }
+
+        "get_server_info" => {
+            match schema::get_server_info().await {
+                Ok(info) => {
+                    let result = format!(
+                        "Server: MySQL {} | User: {} | DB: {} | Charset: {} ({}) | TZ: {} | Max conns: {}",
+                        info.version, info.current_user, info.current_database,
+                        info.character_set, info.collation, info.timezone, info.max_connections
+                    );
+                    conversation.push_str(&format!("\n\nTool result: {result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
         _ => {
-            conversation.push_str(&format!("\n\nTool error: Unknown tool '{tool_name}'"));
+            conversation.push_str(&format!(
+                "\n\nTool error: Unknown tool '{tool_name}'.\n\
+                 Available tools: list_tables, get_table_schema, get_sample_data, get_indexes, \
+                 get_foreign_keys, get_constraints, list_views, list_procedures, list_triggers, \
+                 get_table_stats, get_table_status, find_relationships, find_similar_columns, \
+                 compare_tables, cross_db_join, explain_query, security_check, validate_sql, \
+                 get_server_info"
+            ));
         }
     }
-    Ok(None)
+
+    // Extract the result from the conversation (last appended part)
+    let result_text = conversation
+        .rsplit_once("\n\nTool result:")
+        .or_else(|| conversation.rsplit_once("\n\nTool error:"))
+        .map(|(_, rest)| rest.trim().chars().take(500).collect())
+        .unwrap_or_else(|| "No result".to_string());
+
+    // Build parameters map
+    let mut params = HashMap::new();
+    if let Some(obj) = tool_call.as_object() {
+        for (k, v) in obj {
+            if k != "tool" {
+                params.insert(k.clone(), v.as_str().unwrap_or("").to_string());
+            }
+        }
+    }
+
+    Ok((None, ToolCallStep {
+        tool_name: tool_name.to_string(),
+        parameters: params,
+        result: result_text,
+        iteration: 0, // Will be set by caller
+    }))
 }
 
 /// Result of SQL column validation against cached schema

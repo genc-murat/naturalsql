@@ -3,7 +3,7 @@ import type {
   ConnectionStatus,
   SchemaResponse,
   NlToSqlRequest,
-  SqlResponse,
+  NlToSqlResponse,
   ExecuteRequest,
   QueryResult,
   LlmConfigResponse,
@@ -43,8 +43,8 @@ export async function removeCachedSchema(database: string): Promise<void> {
   return invoke("remove_cached_schema", { database });
 }
 
-export async function nlToSql(request: NlToSqlRequest): Promise<SqlResponse> {
-  return invoke<SqlResponse>("nl_to_sql", { request });
+export async function nlToSql(request: NlToSqlRequest): Promise<NlToSqlResponse> {
+  return invoke<NlToSqlResponse>("nl_to_sql", { request });
 }
 
 export async function executeSql(request: ExecuteRequest): Promise<QueryResult> {

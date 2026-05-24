@@ -22,7 +22,8 @@ import {
 } from "lucide-react";
 import { nlToSql, executeSql, explainSql, explainSqlNatural, fixSql, optimizeSql } from "../api";
 import { JoinBuilder } from "./JoinBuilder";
-import type { QueryResult, Schema } from "../types";
+import { ToolCallTrace } from "./ToolCallTrace";
+import type { QueryResult, Schema, ToolCallStep } from "../types";
 
 interface QueryEditorProps {
   onResult: (result: QueryResult) => void;
@@ -58,6 +59,9 @@ export function QueryEditor({
   const [sqlOptimization, setSqlOptimization] = useState<{ suggestions: string; optimized_sql: string | null } | null>(null);
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [showJoinBuilder, setShowJoinBuilder] = useState(false);
+  const [toolSteps, setToolSteps] = useState<ToolCallStep[]>([]);
+  const [toolIterations, setToolIterations] = useState(0);
+  const [toolFallback, setToolFallback] = useState(false);
 
   // Track theme changes
   useEffect(() => {
@@ -113,6 +117,9 @@ export function QueryEditor({
         database: selectedDatabase || "",
       });
       setSqlText(response.sql);
+      setToolSteps(response.tool_calls);
+      setToolIterations(response.iterations);
+      setToolFallback(response.used_fallback);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Translation failed");
     } finally {
@@ -374,6 +381,9 @@ export function QueryEditor({
           }}
         />
       </div>
+
+      {/* Tool Call Trace */}
+      <ToolCallTrace steps={toolSteps} iterations={toolIterations} usedFallback={toolFallback} />
 
       {/* Toolbar */}
       <div className="flex items-center justify-between px-3 py-2 border-t border-[var(--border)] bg-[var(--bg-secondary)] shrink-0">

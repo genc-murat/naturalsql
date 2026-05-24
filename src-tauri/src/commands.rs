@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::config::{self, ConnectionProfile, LlmConfig};
 use crate::error::AppError;
@@ -18,8 +19,25 @@ pub struct ExecuteRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct SqlResponse {
     pub sql: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ToolCallStep {
+    pub tool_name: String,
+    pub parameters: HashMap<String, String>,
+    pub result: String,
+    pub iteration: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NlToSqlResponse {
+    pub sql: String,
+    pub tool_calls: Vec<ToolCallStep>,
+    pub iterations: u32,
+    pub used_fallback: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -100,7 +118,7 @@ pub async fn remove_cached_schema(database: String) -> Result<(), AppError> {
 }
 
 #[tauri::command]
-pub async fn nl_to_sql(request: NlToSqlRequest) -> Result<SqlResponse, AppError> {
+pub async fn nl_to_sql(request: NlToSqlRequest) -> Result<NlToSqlResponse, AppError> {
     let all_schemas = schema::load_all_cached_schemas()?;
     if all_schemas.is_empty() {
         return Err(AppError::SchemaNotCached);
@@ -111,7 +129,19 @@ pub async fn nl_to_sql(request: NlToSqlRequest) -> Result<SqlResponse, AppError>
         &request.natural_language,
         &all_schemas,
     ).await {
-        Ok(sql) => Ok(SqlResponse { sql }),
+        Ok((sql, tool_steps, iterations)) => {
+            Ok(NlToSqlResponse {
+                sql,
+                tool_calls: tool_steps.into_iter().map(|s| crate::commands::ToolCallStep {
+                    tool_name: s.tool_name,
+                    parameters: s.parameters,
+                    result: s.result,
+                    iteration: s.iteration,
+                }).collect(),
+                iterations,
+                used_fallback: false,
+            })
+        }
         Err(e) => {
             // Fallback to single-prompt approach if tool calling fails
             eprintln!("Tool calling failed, falling back to single-prompt: {}", e);
@@ -120,7 +150,12 @@ pub async fn nl_to_sql(request: NlToSqlRequest) -> Result<SqlResponse, AppError>
                 &request.natural_language,
                 &schema_context,
             ).await?;
-            Ok(SqlResponse { sql })
+            Ok(NlToSqlResponse {
+                sql,
+                tool_calls: Vec::new(),
+                iterations: 0,
+                used_fallback: true,
+            })
         }
     }
 }

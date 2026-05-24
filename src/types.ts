@@ -29,8 +29,18 @@ export interface NlToSqlRequest {
   database: string;
 }
 
-export interface SqlResponse {
+export interface ToolCallStep {
+  tool_name: string;
+  parameters: Record<string, string>;
+  result: string;
+  iteration: number;
+}
+
+export interface NlToSqlResponse {
   sql: string;
+  tool_calls: ToolCallStep[];
+  iterations: number;
+  used_fallback: boolean;
 }
 
 export interface ExecuteRequest {
