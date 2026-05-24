@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { sql, MySQL } from "@codemirror/lang-sql";
 import { vscodeDark, vscodeLight } from "@uiw/codemirror-theme-vscode";
@@ -20,11 +20,17 @@ import {
   XCircle,
   Zap,
   GitBranch,
+  Shield,
+  Pencil,
+  Square,
+  Loader,
 } from "lucide-react";
-import { nlToSql, executeSql, explainSql, explainSqlNatural, fixSql, optimizeSql } from "../api";
+import { nlToSql, executeSql, explainSql, explainSqlNatural, fixSql, optimizeSql, schemaMigration, nlDataEdit, executeSqlStreaming, cancelRunningQuery, setupStreamListeners, cleanupStreamListeners } from "../api";
 import { JoinBuilder } from "./JoinBuilder";
 import { ToolCallTrace } from "./ToolCallTrace";
-import type { QueryResult, Schema, ToolCallStep } from "../types";
+import { MigrationPreview } from "./MigrationPreview";
+import { DataEditPreview } from "./DataEditPreview";
+import type { QueryResult, Schema, ToolCallStep, SchemaMigrationResponse, DataEditResponse } from "../types";
 
 interface QueryEditorProps {
   onResult: (result: QueryResult) => void;
@@ -32,6 +38,10 @@ interface QueryEditorProps {
   selectedDatabase: string | null;
   tableNames?: string[];
   initialSql?: string;
+  initialNaturalLanguage?: string;
+  onSqlChange?: (sql: string) => void;
+  onNlChange?: (nl: string) => void;
+  onToolSteps?: (steps: ToolCallStep[], iterations: number, fallback: boolean) => void;
   onCollapse?: () => void;
 }
 
@@ -41,10 +51,14 @@ export function QueryEditor({
   selectedDatabase,
   tableNames = [],
   initialSql = "",
+  initialNaturalLanguage = "",
+  onSqlChange,
+  onNlChange,
+  onToolSteps,
   onCollapse,
 }: QueryEditorProps) {
-  const [naturalLanguage, setNaturalLanguage] = useState("");
-  const [sqlText, setSqlText] = useState("");
+  const [naturalLanguage, setNaturalLanguage] = useState(initialNaturalLanguage);
+  const [sqlText, setSqlText] = useState(initialSql);
   const [isTranslating, setIsTranslating] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
   const [error, setError] = useState("");
@@ -65,6 +79,17 @@ export function QueryEditor({
   const [toolSteps, setToolSteps] = useState<ToolCallStep[]>([]);
   const [toolIterations, setToolIterations] = useState(0);
   const [toolFallback, setToolFallback] = useState(false);
+  const [editorMode, setEditorMode] = useState<"query" | "schema" | "edit">("query");
+  const [migrationResult, setMigrationResult] = useState<SchemaMigrationResponse | null>(null);
+  const [isMigrationLoading, setIsMigrationLoading] = useState(false);
+  const [showMigrationPreview, setShowMigrationPreview] = useState(false);
+  const [dataEditResult, setDataEditResult] = useState<DataEditResponse | null>(null);
+  const [isDataEditLoading, setIsDataEditLoading] = useState(false);
+  const [showDataEditPreview, setShowDataEditPreview] = useState(false);
+  const [streaming, setStreaming] = useState(false);
+  const [streamingProgress, setStreamingProgress] = useState(0);
+  const [streamQueryId, setStreamQueryId] = useState<string | null>(null);
+  const streamingRowsRef = useRef<(string | number | boolean | null)[][]>([]);
 
   // Track theme changes
   useEffect(() => {
@@ -84,6 +109,23 @@ export function QueryEditor({
       setSqlText(initialSql);
     }
   }, [initialSql]);
+
+  // Cleanup stream listeners on unmount
+  useEffect(() => {
+    return () => {
+      cleanupStreamListeners();
+    };
+  }, []);
+
+  const handleSetSql = (val: string) => {
+    setSqlText(val);
+    onSqlChange?.(val);
+  };
+
+  const handleSetNl = (val: string) => {
+    setNaturalLanguage(val);
+    onNlChange?.(val);
+  };
 
   const extensions = useMemo(
     () => [
@@ -123,6 +165,8 @@ export function QueryEditor({
       setToolSteps(response.tool_calls);
       setToolIterations(response.iterations);
       setToolFallback(response.used_fallback);
+      onSqlChange?.(response.sql);
+      onToolSteps?.(response.tool_calls, response.iterations, response.used_fallback);
     } catch (err) {
       setError(typeof err === "string" ? err : err instanceof Error ? err.message : "Translation failed");
     } finally {
@@ -142,6 +186,68 @@ export function QueryEditor({
     } catch (err) {
       setError(typeof err === "string" ? err : err instanceof Error ? err.message : "Query execution failed");
     } finally {
+      setIsExecuting(false);
+    }
+  };
+
+  const handleExecuteStreaming = async () => {
+    if (!sqlText.trim()) return;
+
+    const queryId = crypto.randomUUID();
+    setStreamQueryId(queryId);
+    setStreaming(true);
+    setStreamingProgress(0);
+    setError("");
+    streamingRowsRef.current = [];
+
+    try {
+      await setupStreamListeners(
+        queryId,
+        (columns, rows, totalSoFar) => {
+          streamingRowsRef.current.push(...rows as (string | number | boolean | null)[][]);
+          setStreamingProgress(totalSoFar);
+          onResult({
+            columns,
+            rows: [...streamingRowsRef.current],
+            row_count: totalSoFar,
+            execution_time_ms: 0,
+            affected_rows: null,
+          });
+        },
+        (_totalDone) => {
+          setStreaming(false);
+          setStreamQueryId(null);
+          cleanupStreamListeners();
+          setIsExecuting(false);
+        },
+        (error) => {
+          setStreaming(false);
+          setStreamQueryId(null);
+          cleanupStreamListeners();
+          setError(error);
+          setIsExecuting(false);
+        },
+      );
+
+      await executeSqlStreaming(sqlText, queryId);
+    } catch (err) {
+      setStreaming(false);
+      setStreamQueryId(null);
+      cleanupStreamListeners();
+      // Error is already reported through the stream-error event
+      if (!streamingRowsRef.current.length) {
+        setError(typeof err === "string" ? err : err instanceof Error ? err.message : "Streaming execution failed");
+      }
+      setIsExecuting(false);
+    }
+  };
+
+  const handleCancelStreaming = async () => {
+    if (streamQueryId) {
+      await cancelRunningQuery(streamQueryId);
+      setStreaming(false);
+      setStreamQueryId(null);
+      cleanupStreamListeners();
       setIsExecuting(false);
     }
   };
@@ -188,7 +294,7 @@ export function QueryEditor({
     try {
       const response = await fixSql({ sql: sqlText, error });
       setSqlFix({ fixed: response.fixed_sql, explanation: response.explanation });
-      setSqlText(response.fixed_sql);
+      handleSetSql(response.fixed_sql);
     } catch (err) {
     } finally {
       setIsFixing(false);
@@ -205,7 +311,7 @@ export function QueryEditor({
       const response = await optimizeSql({ sql: sqlText });
       setSqlOptimization({ suggestions: response.suggestions, optimized_sql: response.optimized_sql });
       if (response.optimized_sql) {
-        setSqlText(response.optimized_sql);
+        handleSetSql(response.optimized_sql);
       }
     } catch (err) {
     } finally {
@@ -220,15 +326,53 @@ export function QueryEditor({
   };
 
   const handleClear = () => {
-    setSqlText("");
-    setNaturalLanguage("");
+    handleSetSql("");
+    handleSetNl("");
     setError("");
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
       e.preventDefault();
-      handleExecute();
+      if (editorMode === "query") {
+        handleExecute();
+      } else {
+        handleSchemaMigration();
+      }
+    }
+  };
+
+  const handleSchemaMigration = async () => {
+    if (!naturalLanguage.trim()) return;
+    setIsMigrationLoading(true);
+    setMigrationResult(null);
+    setShowMigrationPreview(true);
+    try {
+      const response = await schemaMigration(naturalLanguage, selectedDatabase || "");
+      setMigrationResult(response);
+      handleSetSql(response.sql);
+    } catch (err) {
+      setError(typeof err === "string" ? err : err instanceof Error ? err.message : "Migration generation failed");
+      setShowMigrationPreview(false);
+    } finally {
+      setIsMigrationLoading(false);
+    }
+  };
+
+  const handleDataEdit = async () => {
+    if (!naturalLanguage.trim()) return;
+    setIsDataEditLoading(true);
+    setDataEditResult(null);
+    setShowDataEditPreview(true);
+    try {
+      const response = await nlDataEdit(naturalLanguage, selectedDatabase || "");
+      setDataEditResult(response);
+      handleSetSql(response.sql);
+    } catch (err) {
+      setError(typeof err === "string" ? err : err instanceof Error ? err.message : "Data edit generation failed");
+      setShowDataEditPreview(false);
+    } finally {
+      setIsDataEditLoading(false);
     }
   };
 
@@ -256,7 +400,7 @@ export function QueryEditor({
         <div className="flex-1">
           <CodeMirror
             value={sqlText}
-            onChange={(val) => setSqlText(val)}
+            onChange={(val) => handleSetSql(val)}
             onKeyDown={handleKeyDown}
             extensions={extensions}
             theme={isDark ? vscodeDark : vscodeLight}
@@ -306,7 +450,7 @@ export function QueryEditor({
             </button>
           </div>
           <button
-            onClick={handleExecute}
+            onClick={handleExecuteStreaming}
             disabled={isExecuting || !sqlText.trim()}
             className="px-6 py-2 rounded-md bg-[var(--success)] text-white font-medium hover:bg-green-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
           >
@@ -326,26 +470,70 @@ export function QueryEditor({
     <div className="flex flex-col h-full">
       {/* NL Input Bar */}
       <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[var(--border)] bg-[var(--bg-secondary)] shrink-0">
-        <Wand2 className="w-4 h-4 text-[var(--accent)] flex-shrink-0" />
+        <div className="flex items-center gap-0.5 border border-[var(--border)] rounded-md p-0.5">
+          <button
+            onClick={() => setEditorMode("query")}
+            className={`p-1 rounded transition-colors ${editorMode === "query" ? "bg-[var(--accent)]/10 text-[var(--accent)]" : "text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)]"}`}
+            title="Query Mode"
+          >
+            <Wand2 className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={() => setEditorMode("schema")}
+            className={`p-1 rounded transition-colors ${editorMode === "schema" ? "bg-[var(--accent)]/10 text-[var(--accent)]" : "text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)]"}`}
+            title="Schema Mode (DDL)"
+          >
+            <Shield className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={() => setEditorMode("edit")}
+            className={`p-1 rounded transition-colors ${editorMode === "edit" ? "bg-[var(--accent)]/10 text-[var(--accent)]" : "text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)]"}`}
+            title="Data Edit Mode (DML)"
+          >
+            <Pencil className="w-3.5 h-3.5" />
+          </button>
+        </div>
         <input
           type="text"
           value={naturalLanguage}
-          onChange={(e) => setNaturalLanguage(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleTranslate()}
-          placeholder="Describe your query in natural language..."
+          onChange={(e) => handleSetNl(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              if (editorMode === "query") handleTranslate();
+              else if (editorMode === "schema") handleSchemaMigration();
+              else handleDataEdit();
+            }
+          }}
+          placeholder={
+            editorMode === "query" ? "Describe your query in natural language..." :
+            editorMode === "schema" ? "Describe schema changes (e.g. 'add email column to users')..." :
+            "Describe data changes (e.g. 'set user 5 status to active')..."
+          }
           className="flex-1 px-3 py-1.5 rounded-md bg-transparent text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none text-sm"
         />
         <button
-          onClick={handleTranslate}
-          disabled={isTranslating || !naturalLanguage.trim()}
+          onClick={
+            editorMode === "query" ? handleTranslate :
+            editorMode === "schema" ? handleSchemaMigration :
+            handleDataEdit
+          }
+          disabled={
+            (editorMode === "query" && (isTranslating || !naturalLanguage.trim())) ||
+            (editorMode === "schema" && (isMigrationLoading || !naturalLanguage.trim())) ||
+            (editorMode === "edit" && (isDataEditLoading || !naturalLanguage.trim()))
+          }
           className="px-3 py-1.5 rounded-md bg-[var(--accent)]/10 text-[var(--accent)] text-sm font-medium hover:bg-[var(--accent)]/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
         >
-          {isTranslating ? (
+          {(editorMode === "query" && isTranslating) || (editorMode === "schema" && isMigrationLoading) || (editorMode === "edit" && isDataEditLoading) ? (
             <Loader2 className="w-3.5 h-3.5 animate-spin" />
-          ) : (
+          ) : editorMode === "query" ? (
             <Sparkles className="w-3.5 h-3.5" />
+          ) : editorMode === "schema" ? (
+            <Shield className="w-3.5 h-3.5" />
+          ) : (
+            <Pencil className="w-3.5 h-3.5" />
           )}
-          Translate
+          {editorMode === "query" ? "Translate" : editorMode === "schema" ? "Generate DDL" : "Generate DML"}
         </button>
       </div>
 
@@ -353,7 +541,7 @@ export function QueryEditor({
       <div className="flex-1 min-h-0 overflow-hidden">
         <CodeMirror
           value={sqlText}
-          onChange={(val) => setSqlText(val)}
+          onChange={(val) => handleSetSql(val)}
           onKeyDown={handleKeyDown}
           extensions={extensions}
           theme={isDark ? vscodeDark : vscodeLight}
@@ -468,19 +656,36 @@ export function QueryEditor({
             <GitBranch className="w-4 h-4" />
           </button>
           <div className="w-px h-5 bg-[var(--border)] mx-0.5" />
-          <button
-            onClick={handleExecute}
-            disabled={isExecuting || !sqlText.trim()}
-            className="px-3 py-1.5 rounded-md bg-[var(--success)] text-white text-sm font-medium hover:bg-green-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5 shrink-0"
-            title="Run (Ctrl+Enter)"
-          >
-            {isExecuting ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Send className="w-4 h-4" />
-            )}
-            Run
-          </button>
+          {streaming ? (
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1 text-xs text-[var(--accent)]">
+                <Loader className="w-3 h-3 animate-spin" />
+                <span>{streamingProgress.toLocaleString()} rows loaded</span>
+              </div>
+              <button
+                onClick={handleCancelStreaming}
+                className="px-2 py-1.5 rounded-md bg-red-500/10 text-red-400 text-sm hover:bg-red-500/20 transition-colors flex items-center gap-1"
+                title="Cancel query"
+              >
+                <Square className="w-3.5 h-3.5" />
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={handleExecuteStreaming}
+              disabled={isExecuting || !sqlText.trim()}
+              className="px-3 py-1.5 rounded-md bg-[var(--success)] text-white text-sm font-medium hover:bg-green-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5 shrink-0"
+              title="Run streaming (Ctrl+Shift+Enter)"
+            >
+              {isExecuting ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Send className="w-4 h-4" />
+              )}
+              Run
+            </button>
+          )}
         </div>
       </div>
 
@@ -584,10 +789,28 @@ export function QueryEditor({
         isOpen={showJoinBuilder}
         onClose={() => setShowJoinBuilder(false)}
         onApply={(sql) => {
-          setSqlText(sql);
+          handleSetSql(sql);
           setShowJoinBuilder(false);
         }}
         tableNames={tableNames}
+      />
+
+      {/* Migration Preview Modal */}
+      <MigrationPreview
+        isOpen={showMigrationPreview}
+        onClose={() => setShowMigrationPreview(false)}
+        migration={migrationResult}
+        loading={isMigrationLoading}
+        onApply={() => setShowMigrationPreview(false)}
+      />
+
+      {/* Data Edit Preview Modal */}
+      <DataEditPreview
+        isOpen={showDataEditPreview}
+        onClose={() => setShowDataEditPreview(false)}
+        edit={dataEditResult}
+        loading={isDataEditLoading}
+        onApply={() => setShowDataEditPreview(false)}
       />
     </div>
   );

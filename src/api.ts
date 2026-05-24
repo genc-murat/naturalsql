@@ -9,7 +9,11 @@ import type {
   LlmConfigResponse,
   UpdateLlmConfigRequest,
   ConnectionProfileResponse,
+  TableStructure,
+  SchemaMigrationResponse,
+  DataEditResponse,
 } from "./types";
+import { listen } from "@tauri-apps/api/event";
 
 export async function connectDb(connectionString: string): Promise<ConnectionStatus> {
   return invoke<ConnectionStatus>("connect_db", { connectionString });
@@ -113,4 +117,71 @@ export async function saveConnectionProfile(profile: ConnectionProfileResponse):
 
 export async function deleteConnectionProfile(name: string): Promise<void> {
   return invoke("delete_connection_profile", { name });
+}
+
+export async function getTableStructure(database: string, table: string): Promise<TableStructure> {
+  return invoke<TableStructure>("get_table_structure", { request: { database, table } });
+}
+
+export async function explainSqlJson(sql: string): Promise<string> {
+  return invoke<string>("explain_sql_json", { request: { sql } });
+}
+
+export async function schemaMigration(naturalLanguage: string, database: string): Promise<SchemaMigrationResponse> {
+  return invoke<SchemaMigrationResponse>("schema_migration", { request: { natural_language: naturalLanguage, database } });
+}
+
+export async function nlDataEdit(naturalLanguage: string, database: string): Promise<DataEditResponse> {
+  return invoke<DataEditResponse>("nl_data_edit", { request: { natural_language: naturalLanguage, database } });
+}
+
+export async function executeSqlStreaming(sql: string, queryId: string): Promise<void> {
+  return invoke<void>("execute_sql_streaming", { request: { sql, query_id: queryId } });
+}
+
+export async function cancelRunningQuery(queryId: string): Promise<boolean> {
+  return invoke<boolean>("cancel_running_query", { queryId });
+}
+
+let unlistenBatchFn: (() => void) | null = null;
+let unlistenDoneFn: (() => void) | null = null;
+let unlistenErrorFn: (() => void) | null = null;
+
+export async function setupStreamListeners(
+  queryId: string,
+  onBatch: (columns: string[], rows: unknown[][], totalSoFar: number) => void,
+  onDone: (totalSoFar: number) => void,
+  onError: (error: string) => void,
+): Promise<void> {
+  cleanupStreamListeners();
+
+  const batch = await listen<{ query_id: string; columns: string[]; rows: unknown[][]; total_so_far: number }>("sql-stream-batch", (event) => {
+    if (event.payload.query_id === queryId) {
+      onBatch(event.payload.columns, event.payload.rows, event.payload.total_so_far);
+    }
+  });
+  unlistenBatchFn = batch;
+
+  const done = await listen<{ query_id: string; total_so_far: number }>("sql-stream-done", (event) => {
+    if (event.payload.query_id === queryId) {
+      onDone(event.payload.total_so_far);
+    }
+  });
+  unlistenDoneFn = done;
+
+  const err = await listen<{ query_id: string; error: string }>("sql-stream-error", (event) => {
+    if (event.payload.query_id === queryId) {
+      onError(event.payload.error);
+    }
+  });
+  unlistenErrorFn = err;
+}
+
+export function cleanupStreamListeners() {
+  unlistenBatchFn?.();
+  unlistenDoneFn?.();
+  unlistenErrorFn?.();
+  unlistenBatchFn = null;
+  unlistenDoneFn = null;
+  unlistenErrorFn = null;
 }

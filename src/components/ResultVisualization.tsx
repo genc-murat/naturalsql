@@ -5,19 +5,22 @@ import {
   TrendingUp,
   Clock,
   Rows3,
+  AlertCircle,
 } from "lucide-react";
 import type { QueryResult } from "../types";
 import { ResultsTable } from "./ResultsTable";
 import { AutoChart } from "./AutoChart";
 import { DataStatistics } from "./DataStatistics";
 import { ResultActions } from "./ResultActions";
+import { ExplainPlan } from "./ExplainPlan";
 
 interface ResultVisualizationProps {
   result: QueryResult | null;
   onApplySql?: (sql: string) => void;
+  currentSql?: string;
 }
 
-type TabId = "table" | "charts" | "stats";
+type TabId = "table" | "charts" | "stats" | "explain";
 
 interface TabDef {
   id: TabId;
@@ -29,9 +32,10 @@ const TABS: TabDef[] = [
   { id: "table", label: "Table", icon: <Table2 className="w-4 h-4" /> },
   { id: "charts", label: "Charts", icon: <BarChart3 className="w-4 h-4" /> },
   { id: "stats", label: "Statistics", icon: <TrendingUp className="w-4 h-4" /> },
+  { id: "explain", label: "Explain", icon: <AlertCircle className="w-4 h-4" /> },
 ];
 
-export function ResultVisualization({ result, onApplySql }: ResultVisualizationProps) {
+export function ResultVisualization({ result, onApplySql, currentSql }: ResultVisualizationProps) {
   const [activeTab, setActiveTab] = useState<TabId>("table");
 
   const hasData = result && result.columns.length > 0;
@@ -115,6 +119,9 @@ export function ResultVisualization({ result, onApplySql }: ResultVisualizationP
         )}
         {activeTab === "stats" && (
           <DataStatistics columns={result.columns} rows={result.rows} />
+        )}
+        {activeTab === "explain" && (
+          <ExplainPlan sql={currentSql || ""} />
         )}
       </div>
     </div>

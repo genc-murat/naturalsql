@@ -28,6 +28,12 @@ pub enum AppError {
 
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("Query cancelled by user")]
+    QueryCancelled,
+
+    #[error("Streaming error: {0}")]
+    Streaming(String),
 }
 
 impl serde::Serialize for AppError {

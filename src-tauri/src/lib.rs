@@ -34,6 +34,12 @@ pub fn run() {
             list_connections,
             save_connection_profile,
             delete_connection_profile,
+            get_table_structure,
+            explain_sql_json,
+            schema_migration,
+            nl_data_edit,
+            execute_sql_streaming,
+            cancel_running_query,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

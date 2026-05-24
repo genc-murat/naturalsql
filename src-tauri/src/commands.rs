@@ -942,3 +942,311 @@ pub async fn delete_connection_profile(name: String) -> Result<(), String> {
     }
     config::delete_connection(name).await
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TableStructureRequest {
+    pub database: String,
+    pub table: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TableStructureResponse {
+    pub ddl: String,
+    pub indexes: Vec<schema::IndexInfo>,
+    pub constraints: Vec<schema::ConstraintInfo>,
+    pub foreign_keys: Vec<schema::ForeignKeyRelation>,
+    pub stats: schema::TableStats,
+    pub status: schema::TableStatus,
+}
+
+#[tauri::command]
+pub async fn get_table_structure(
+    request: TableStructureRequest,
+) -> Result<TableStructureResponse, AppError> {
+    let ddl = schema::get_table_ddl(&request.database, &request.table).await?;
+    let indexes = schema::get_table_indexes(&request.database, &request.table).await?;
+    let constraints = schema::get_table_constraints(&request.database, &request.table).await?;
+    let foreign_keys = schema::get_table_foreign_keys(&request.database, &request.table).await?;
+    let stats = schema::get_table_statistics(&request.database, &request.table).await?;
+    let status = schema::get_table_status(&request.database, &request.table).await?;
+
+    Ok(TableStructureResponse {
+        ddl,
+        indexes,
+        constraints,
+        foreign_keys,
+        stats,
+        status,
+    })
+}
+
+#[tauri::command]
+pub async fn explain_sql_json(request: ExecuteRequest) -> Result<String, AppError> {
+    query::explain_query_json(&request.sql).await
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SchemaMigrationRequest {
+    pub natural_language: String,
+    pub database: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SchemaMigrationResponse {
+    pub sql: String,
+    pub explanation: String,
+    pub risk_level: String,
+}
+
+#[tauri::command]
+pub async fn schema_migration(
+    request: SchemaMigrationRequest,
+) -> Result<SchemaMigrationResponse, AppError> {
+    if request.natural_language.trim().is_empty() {
+        return Err(AppError::InvalidLlmResponse);
+    }
+
+    let all_schemas = schema::load_all_cached_schemas()?;
+    let schema_context = if all_schemas.is_empty() {
+        "No schema information available.".to_string()
+    } else {
+        schema::format_all_schemas_for_prompt(&all_schemas)
+    };
+
+    let prompt = format!(
+        "You are a MySQL 5.6+ database administrator. Given the database schema below, generate DDL SQL \
+         (ALTER TABLE, CREATE TABLE, DROP TABLE, CREATE INDEX, etc.) based on the user's request.\n\n\
+         IMPORTANT RULES:\n\
+         1. Only generate DDL statements (no SELECT/INSERT/UPDATE/DELETE).\n\
+         2. Always use fully qualified table names: database.table\n\
+         3. Return ONLY the SQL on the first line(s), then a blank line, then a brief explanation.\n\
+         4. Do not include markdown code blocks or backticks.\n\
+         5. Preserve existing data where possible (use ADD COLUMN, not DROP + CREATE).\n\n\
+         {}\n\n\
+         User request: {}\n\n\
+         DDL SQL:",
+        schema_context, request.natural_language
+    );
+
+    let url = config::get_llm_url().await;
+    let model = config::get_llm_model().await;
+
+    let response = reqwest::Client::new()
+        .post(&format!("{}/api/generate", url.trim_end_matches('/')))
+        .json(&serde_json::json!({
+            "model": model,
+            "prompt": prompt,
+            "stream": false,
+        }))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(AppError::QueryExecution(
+            format!("Ollama returned status: {}", response.status())
+        ));
+    }
+
+    #[derive(Deserialize)]
+    struct OllamaResp {
+        response: String,
+    }
+
+    let body: OllamaResp = response.json().await?;
+    let text = body.response.trim().to_string();
+
+    let parts: Vec<&str> = text.splitn(2, "\n\n").collect();
+    let sql = parts.first()
+        .unwrap_or(&"")
+        .trim()
+        .trim_start_matches("```sql")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim()
+        .to_string();
+    let explanation = parts.get(1)
+        .unwrap_or(&"")
+        .trim()
+        .to_string();
+
+    if sql.is_empty() {
+        return Err(AppError::InvalidLlmResponse);
+    }
+
+    let sql_upper = sql.to_uppercase();
+    let risk_level = if sql_upper.contains("DROP TABLE") || sql_upper.contains("DROP DATABASE") {
+        "high".to_string()
+    } else if sql_upper.contains("ALTER TABLE") && (sql_upper.contains("DROP COLUMN") || sql_upper.contains("MODIFY COLUMN")) {
+        "high".to_string()
+    } else if sql_upper.contains("CREATE TABLE") || sql_upper.contains("CREATE INDEX") {
+        "medium".to_string()
+    } else {
+        "low".to_string()
+    };
+
+    Ok(SchemaMigrationResponse {
+        sql,
+        explanation,
+        risk_level,
+    })
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DataEditRequest {
+    pub natural_language: String,
+    pub database: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DataEditResponse {
+    pub sql: String,
+    pub preview_sql: String,
+    pub explanation: String,
+    pub undo_sql: String,
+    pub affected_estimate: String,
+}
+
+#[tauri::command]
+pub async fn nl_data_edit(
+    request: DataEditRequest,
+) -> Result<DataEditResponse, AppError> {
+    if request.natural_language.trim().is_empty() {
+        return Err(AppError::InvalidLlmResponse);
+    }
+
+    let all_schemas = schema::load_all_cached_schemas()?;
+    let schema_context = if all_schemas.is_empty() {
+        "No schema information available.".to_string()
+    } else {
+        schema::format_all_schemas_for_prompt(&all_schemas)
+    };
+
+    let prompt = format!(
+        "You are a MySQL 5.6+ data editor. Given the database schema below, generate DML SQL \
+         (INSERT, UPDATE, DELETE) based on the user's request.\n\n\
+         STRICT RULES:\n\
+         1. Only generate DML statements (no SELECT, no DDL).\n\
+         2. Always include a WHERE clause for UPDATE and DELETE.\n\
+         3. Use fully qualified table names: database.table\n\
+         4. Format your response as follows (4 sections separated by blank lines):\n\
+            - The DML SQL statement\n\
+            - A SELECT query to preview affected data (preview)\n\
+            - A brief explanation\n\
+            - An undo SQL statement (reverse operation)\n\
+         5. Do not include markdown code blocks or backticks.\n\n\
+         {}\n\n\
+         User request: {}\n\n\
+         DML SQL:",
+        schema_context, request.natural_language
+    );
+
+    let url = config::get_llm_url().await;
+    let model = config::get_llm_model().await;
+
+    let response = reqwest::Client::new()
+        .post(&format!("{}/api/generate", url.trim_end_matches('/')))
+        .json(&serde_json::json!({
+            "model": model,
+            "prompt": prompt,
+            "stream": false,
+        }))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(AppError::QueryExecution(
+            format!("Ollama returned status: {}", response.status())
+        ));
+    }
+
+    #[derive(Deserialize)]
+    struct OllamaResp {
+        response: String,
+    }
+
+    let body: OllamaResp = response.json().await?;
+    let text = body.response.trim().to_string();
+
+    let parts: Vec<&str> = text.split("\n\n").collect();
+
+    let clean = |s: &str| -> String {
+        s.trim()
+            .trim_start_matches("```sql")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim()
+            .to_string()
+    };
+
+    let sql = clean(parts.first().unwrap_or(&""));
+    let preview_sql = clean(parts.get(1).unwrap_or(&""));
+    let explanation = parts.get(2).unwrap_or(&"").trim().to_string();
+    let undo_sql = clean(parts.get(3).unwrap_or(&""));
+
+    if sql.is_empty() {
+        return Err(AppError::InvalidLlmResponse);
+    }
+
+    let sql_upper = sql.to_uppercase();
+    if (sql_upper.starts_with("UPDATE") || sql_upper.starts_with("DELETE")) && !sql_upper.contains("WHERE") {
+        return Err(AppError::QueryExecution(
+            "Safety check failed: Generated SQL has no WHERE clause. Refusing to execute.".to_string()
+        ));
+    }
+
+    let affected_estimate = if sql_upper.starts_with("INSERT") {
+        "1 row".to_string()
+    } else {
+        "unknown".to_string()
+    };
+
+    Ok(DataEditResponse {
+        sql,
+        preview_sql,
+        explanation,
+        undo_sql,
+        affected_estimate,
+    })
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StreamingRequest {
+    pub sql: String,
+    pub query_id: String,
+}
+
+#[tauri::command]
+pub async fn execute_sql_streaming(
+    app_handle: tauri::AppHandle,
+    request: StreamingRequest,
+) -> Result<(), AppError> {
+    if request.sql.trim().is_empty() {
+        return Err(AppError::InvalidLlmResponse);
+    }
+
+    // Register for cancel
+    let _cancel_flag = query::register_query(&request.query_id);
+
+    let result = query::execute_query_streaming(
+        &app_handle,
+        &request.sql,
+        &request.query_id,
+    ).await;
+
+    query::unregister_query(&request.query_id);
+
+    if let Err(ref e) = result {
+        use tauri::Emitter;
+        let _ = app_handle.emit("sql-stream-error", query::StreamErrorPayload {
+            query_id: request.query_id.clone(),
+            error: e.to_string(),
+        });
+    }
+
+    result
+}
+
+#[tauri::command]
+pub async fn cancel_running_query(query_id: String) -> Result<bool, String> {
+    Ok(query::cancel_query(&query_id))
+}
