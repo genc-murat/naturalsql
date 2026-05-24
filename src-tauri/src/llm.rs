@@ -36,11 +36,12 @@ pub async fn natural_language_to_sql(
         schema_context, natural_language
     );
 
-    let request = json!({
-        "model": model,
-        "prompt": prompt,
-        "stream": false,
-    });
+     let request = json!({
+         "model": model,
+         "prompt": prompt,
+         "stream": false,
+         "options": json!({ "num_ctx": 65536, "num_predict": 2048 })
+     });
 
     let client = Client::builder()
         .timeout(Duration::from_secs(120))
@@ -836,14 +837,15 @@ async fn call_ollama_generate(
     prompt: &str,
     natural_language: &str,
 ) -> Result<String, AppError> {
-    let response = client
-        .post(api_url)
-        .json(&json!({
-            "model": model,
-            "prompt": prompt,
-            "stream": false,
-            "temperature": 0.1,
-        }))
+         let response = client
+             .post(api_url)
+             .json(&json!({
+                 "model": model,
+                 "prompt": prompt,
+                 "stream": false,
+                 "temperature": 0.1,
+                 "options": json!({ "num_ctx": 65536, "num_predict": 2048 })
+             }))
         .send()
         .await?;
 
@@ -1014,22 +1016,43 @@ async fn process_tool_call(
             }
         }
         "get_table_schema" => {
-            let database = params_map.get("database").map(|s| s.as_str()).unwrap_or("");
-            let table = params_map.get("table").map(|s| s.as_str()).unwrap_or("");
-            if let Some(schema) = all_schemas.iter().find(|s| s.database == database) {
-                if let Some(tbl) = schema.tables.iter().find(|t| t.name == table) {
-                    let cols: Vec<String> = tbl.columns.iter().map(|c| {
-                        let key = if !c.column_key.is_empty() { format!(" [{}]", c.column_key) } else { "".to_string() };
-                        format!("  {} {}{}{}", c.name, c.column_type, key, if c.is_nullable { " NULL" } else { " NOT NULL" })
-                    }).collect();
-                    let result = format!("Table {}.{} columns:\n{}", database, table, cols.join("\n"));
-                    conversation.push_str(&format!("\n\nTool result:\n{result}"));
-                    eprintln!("[LLM] {}", result.chars().take(100).collect::<String>());
+            let database = params_map.get("database").map(|s| s.as_str()).unwrap_or("").trim();
+            let table = params_map.get("table").map(|s| s.as_str()).unwrap_or("").trim();
+            
+            // Case-insensitive, whitespace-trimmed database lookup
+            let schema = all_schemas.iter()
+                .find(|s| s.database.eq_ignore_ascii_case(database));
+                
+            if let Some(schema) = schema {
+                // Case-insensitive, whitespace-trimmed table lookup
+                let tbl = schema.tables.iter()
+                    .find(|t| t.name.eq_ignore_ascii_case(table));
+                    
+                if let Some(tbl) = tbl {
+                    if tbl.columns.is_empty() {
+                        conversation.push_str(&format!("\n\nTool warning: Table {}.{} exists but has no columns", schema.database, tbl.name));
+                    } else {
+                        let cols: Vec<String> = tbl.columns.iter().map(|c| {
+                            let key = if !c.column_key.is_empty() { format!(" [{}]", c.column_key) } else { "".to_string() };
+                            format!("  {} {}{}{}", c.name, c.column_type, key, if c.is_nullable { " NULL" } else { " NOT NULL" })
+                        }).collect();
+                        let result = format!("Table {}.{} columns:\n{}", schema.database, tbl.name, cols.join("\n"));
+                        conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                        eprintln!("[LLM] {}", result.chars().take(100).collect::<String>());
+                    }
                 } else {
-                    conversation.push_str(&format!("\n\nTool error: Table '{}' not found in '{}'", table, database));
+                    let available_tables: Vec<String> = schema.tables.iter()
+                        .map(|t| t.name.clone())
+                        .collect();
+                    conversation.push_str(&format!("\n\nTool error: Table '{}' not found in database '{}'. Available tables: [{}]", 
+                        table, schema.database, available_tables.join(", ")));
                 }
             } else {
-                conversation.push_str(&format!("\n\nTool error: Database '{}' not found", database));
+                let available_dbs: Vec<String> = all_schemas.iter()
+                    .map(|s| s.database.clone())
+                    .collect();
+                conversation.push_str(&format!("\n\nTool error: Database '{}' not found. Available databases: [{}]", 
+                    database, available_dbs.join(", ")));
             }
         }
         "get_sample_data" => {
