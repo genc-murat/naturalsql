@@ -129,6 +129,15 @@ pub async fn natural_language_to_sql_with_tools(
     for iteration in 0..max_iterations {
         eprintln!("[LLM] Tool iteration {}/{}", iteration + 1, max_iterations);
 
+        // Build available tables list for prompt
+        let available_tables_str: String = all_schemas.iter()
+            .map(|s| {
+                let tables: Vec<&str> = s.tables.iter().map(|t| t.name.as_str()).collect();
+                format!("- {}: {}", s.database, tables.join(", "))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
         let exploration_guidance = if schemas_explored.len() >= 2 {
             let tables_list = schemas_explored.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
             format!("You already have schema for: {tables_list}. Write the SQL query NOW. Do NOT call any more schema tools.\n")
@@ -136,38 +145,64 @@ pub async fn natural_language_to_sql_with_tools(
             let table_name = schemas_explored.iter().next().unwrap();
             format!("You already have schema for {table_name}. Get the SECOND table's schema with get_table_schema, or use cross_db_join. Do NOT call get_indexes or get_foreign_keys — you don't need them to write SQL.\n")
         } else {
-            "RULE: You MUST call get_table_schema for each table BEFORE writing SQL. NEVER guess column names. Always use get_table_schema first.\n".to_string()
+            format!("RULE: You MUST call get_table_schema for each table BEFORE writing SQL. NEVER guess column names. Always use get_table_schema first.\n\n\
+                     **AVAILABLE TABLES (use these exact names, NEVER placeholders):**\n\
+                     {available_tables_str}\n")
         };
 
+        // IMPORTANT: No angle-bracket placeholders like <table_name> — LLMs copy them verbatim.
+        // Use ALL_CAPS descriptive labels instead.
         let tools_description = format!(
             "You have access to tools. Use them by outputting a JSON object:\n\
              Core (for writing SQL):\n\
-             - {{\"tool\": \"list_tables\", \"database\": \"<db_name>\"}}\n\
-             - {{\"tool\": \"get_table_schema\", \"database\": \"<db_name>\", \"table\": \"<table_name>\"}}\n\
-             - {{\"tool\": \"cross_db_join\", \"left_table\": \"db1.table1\", \"right_table\": \"db2.table2\", \"join_type\": \"INNER JOIN\"}}\n\
-             Auxiliary (use only when needed for indexes/FK/stats):\n\
-             - {{\"tool\": \"get_indexes\", \"database\": \"<db_name>\", \"table\": \"<table_name>\"}}\n\
-             - {{\"tool\": \"get_foreign_keys\", \"database\": \"<db_name>\", \"table\": \"<table_name>\"}}\n\
-             - {{\"tool\": \"get_constraints\", \"database\": \"<db_name>\", \"table\": \"<table_name>\"}}\n\
-             - {{\"tool\": \"list_views\", \"database\": \"<db_name>\"}}\n\
-             - {{\"tool\": \"list_procedures\", \"database\": \"<db_name>\"}}\n\
-             - {{\"tool\": \"find_relationships\", \"from_database\": \"<db>\", \"to_database\": \"<db>\"}}\n\
-             - {{\"tool\": \"find_similar_columns\", \"column_pattern\": \"user_id\"}}\n\
-             - {{\"tool\": \"compare_tables\", \"left\": \"db1.table1\", \"right\": \"db2.table1\"}}\n\
-             - {{\"tool\": \"explain_query\", \"sql\": \"SELECT ...\"}}\n\
-             - {{\"tool\": \"security_check\", \"sql\": \"SELECT ...\"}}\n\
-             - {{\"tool\": \"validate_sql\", \"sql\": \"SELECT ...\"}}\n\
-             - {{\"tool\": \"get_server_info\"}}\n\
+             - list_tables(database) — list tables in a database\n\
+             - get_table_schema(database, table) — get column definitions for a table\n\
+             - get_sample_data(database, table) — get 3 sample rows from a table\n\
+             - cross_db_join(left_table, right_table, join_type) — generate JOIN SQL for two tables\n\
+             Data Discovery:\n\
+             - get_table_row_count(database, table) — approximate row count\n\
+             - get_column_values(database, table, column, limit) — distinct column values\n\
+             - get_recent_data(database, table, limit) — last N rows ordered by date/id\n\
+             - search_data(database, table, pattern) — LIKE search across string columns\n\
+             Schema & Metadata:\n\
+             - get_table_ddl(database, table) — SHOW CREATE TABLE DDL\n\
+             - get_indexes(database, table) — index definitions\n\
+             - get_foreign_keys(database, table) — foreign key definitions\n\
+             - get_constraints(database, table) — all constraints (PK, FK, UNIQUE, CHECK)\n\
+             - list_views(database) — list views\n\
+             - list_procedures(database) — list stored procedures\n\
+             - list_triggers(database) — list triggers\n\
+             - get_table_stats(database, table) — row count, data size, index size\n\
+             - get_table_status(database, table) — engine, row format, collation\n\
+             - analyze_table_health(database, table) — fragmentation and health check\n\
+             Cross-Database Discovery:\n\
+             - find_relationships(from_database, to_database) — FK relations between databases\n\
+             - find_similar_columns(column_pattern) — find columns matching a name pattern\n\
+             - compare_tables(left, right) — compare structure of two tables\n\
+             Server Info & Variables:\n\
+             - get_server_info — MySQL version, user, charset\n\
+             - get_variable(name) — server variable value\n\
+             - get_user_privileges(database) — user permissions\n\
+             Query Validation:\n\
+             - explain_query(sql) — EXPLAIN plan for a query\n\
+             - validate_sql(sql) — syntax validation\n\
+             - security_check(sql) — security analysis\n\
              {exploration_guidance}"
         );
 
         let prompt = format!(
             "You are a MySQL expert. Available databases: {db_list}\n\n\
              {tools_description}\n\n\
-             When you have enough information, write ONLY the SQL query. No explanations, no markdown, no backticks.\n\
-             Always use fully qualified table names: database.table\n\
-             IMPORTANT: If you need a tool, output ONLY the JSON. If you're ready, output ONLY the SQL.\n\
-             Do NOT repeat the same tool call — use the results below to decide your next step.\n\n\
+             **STRICT RULES - FOLLOW EXACTLY:**\n\
+             1. NEVER invent table names, column names, or data values. ONLY use names returned by tools.\n\
+             2. ALWAYS call get_table_schema BEFORE writing any SQL query. NEVER guess column names.\n\
+             3. Use ONLY column names exactly as shown in schema results. Case-sensitive.\n\
+             4. If unsure about a table or column, say 'I need to check the schema first' and call the tool.\n\
+             5. When you have enough information, write ONLY the SQL query. No explanations, no markdown, no backticks.\n\
+             6. Always use fully qualified table names: database.table\n\
+             7. IMPORTANT: If you need a tool, output ONLY the JSON. If you're ready, output ONLY the SQL.\n\
+             8. Do NOT repeat the same tool call — use the results below to decide your next step.\n\
+             9. If a tool returns an error, try a different approach or ask the user for clarification.\n\n\
              {conversation}\n\n\
              User's question: {natural_language}",
         );
@@ -211,7 +246,72 @@ pub async fn natural_language_to_sql_with_tools(
         let mut tool_continued = false;
 
         if let Ok(tool_call) = serde_json::from_str::<serde_json::Value>(&text) {
+            // Support two JSON formats:
+            // Format A: {"tool": "get_indexes", "database": "...", "table": "..."}
+            // Format B: {"get_indexes": {"database": "...", "table": "..."}}  (nested)
+            let tool_call = if tool_call.get("tool").and_then(|v| v.as_str()).is_some() {
+                // Format A — already has "tool" key
+                tool_call
+            } else if let Some((tool_name, params)) = tool_call.as_object().and_then(|obj| {
+                // Format B — find first key that matches a known tool name
+                obj.iter().find_map(|(k, v)| {
+                    if k == "tool" || k == "response" || k == "content" || k == "parameters" {
+                        return None;
+                    }
+                    // Check if the value is an object (nested params)
+                    if v.is_object() {
+                        Some((k.clone(), v.clone()))
+                    } else {
+                        None
+                    }
+                })
+            }) {
+                // Reconstruct into Format A
+                let mut normalized = serde_json::Map::new();
+                normalized.insert("tool".to_string(), serde_json::json!(tool_name));
+                if let Some(params_obj) = params.as_object() {
+                    for (k, v) in params_obj {
+                        normalized.insert(k.clone(), v.clone());
+                    }
+                }
+                eprintln!("[LLM] Normalized nested JSON to Format A: tool={}", tool_name);
+                serde_json::Value::Object(normalized)
+            } else {
+                // Not a tool call at all
+                tool_call
+            };
+
             if let Some(raw_tool_name) = tool_call.get("tool").and_then(|v| v.as_str()) {
+                // Validate parameter values — reject placeholder-like values
+                if let Some(obj) = tool_call.as_object() {
+                    for (key, val) in obj {
+                        if key == "tool" { continue; }
+                        if let Some(s) = val.as_str() {
+                            let trimmed = s.trim();
+                            if trimmed.starts_with('<') && trimmed.ends_with('>') {
+                                eprintln!("[LLM] Rejected placeholder param: {}={}", key, s);
+                                // Build a list of available tables to guide the LLM
+                                let available_tables: Vec<String> = all_schemas.iter()
+                                    .map(|s| {
+                                        let tables: Vec<&str> = s.tables.iter().map(|t| t.name.as_str()).collect();
+                                        format!("{}.{{{}}}", s.database, tables.join(", "))
+                                    })
+                                    .collect();
+                                let tables_hint = available_tables.join("; ");
+                                conversation.push_str(&format!(
+                                    "\n\nTool error: Parameter '{}' has a placeholder value '{}'. \
+                                     You MUST use a REAL table name from these available tables: {}\n\
+                                     Call list_tables(database) first if you need to see the list again.",
+                                    key, s, tables_hint
+                                ));
+                                tool_continued = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if tool_continued { continue; }
+
                 // Normalize tool name for tracking (handles aliases/typos)
                 let normalized_name = match raw_tool_name {
                     "list_indexes" | "get_index" | "show_indexes" => "get_indexes",
@@ -229,6 +329,14 @@ pub async fn natural_language_to_sql_with_tools(
                     "find_similar" => "find_similar_columns",
                     "compare" => "compare_tables",
                     "join" => "cross_db_join",
+                    "get_row_count" | "count_rows" => "get_table_row_count",
+                    "get_column_values" | "distinct_values" => "get_column_values",
+                    "get_recent" | "recent_data" => "get_recent_data",
+                    "search_data" | "search_table" => "search_data",
+                    "get_ddl" | "show_create_table" => "get_table_ddl",
+                    "get_variable" | "server_variable" => "get_variable",
+                    "get_privileges" | "user_privileges" => "get_user_privileges",
+                    "analyze_health" | "table_health" => "analyze_table_health",
                     _ => raw_tool_name,
                 };
 
@@ -248,12 +356,22 @@ pub async fn natural_language_to_sql_with_tools(
                         schema::format_all_schemas_for_prompt(all_schemas)
                     };
                     let fallback_prompt = format!(
-                        "You are a MySQL 5.6+ expert. Given the database schema below, \
-                         write a SQL query to answer the user's question.\n\
-                         Only return the SQL query, no explanations, no markdown.\n\n\
+                        "You are a MySQL 5.6+ expert. Your ONLY job is to write a SELECT query that ANSWERS the user's question.\n\
+                         \n\
+                         STRICTLY FORBIDDEN — NEVER write these:\n\
+                         - NEVER query information_schema (no information_schema.TABLES, COLUMNS, STATISTICS, etc.)\n\
+                         - NEVER use SHOW commands (SHOW INDEX, SHOW CREATE TABLE, SHOW GRANTS, etc.)\n\
+                         - NEVER use EXPLAIN\n\
+                         - NEVER query mysql.* system tables\n\
+                         \n\
+                         ALLOWED — ONLY write:\n\
+                         - SELECT ... FROM actual_database.actual_table\n\
+                         - Use ONLY column names shown in the schema below\n\
+                         \n\
+                         Database schema:\n\
                          {schema_context}\n\n\
                          User's question: {natural_language}\n\n\
-                         SQL Query:",
+                         Write a SELECT query that ANSWERS this question. ONLY return the SQL, no explanations:\n",
                     );
                     return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt).await.map(|sql| (sql, tool_steps, (iteration + 1) as u32));
                 }
@@ -295,79 +413,148 @@ pub async fn natural_language_to_sql_with_tools(
 
         // If not parsed as whole JSON, try extracting from mixed content
         if !tool_continued {
-            if let Some(tool_call) = extract_first_json_object(&text) {
+            if let Some(mut tool_call) = extract_first_json_object(&text) {
+                // Support nested JSON format: {"get_indexes": {"database": "...", "table": "..."}}
+                if tool_call.get("tool").is_none() {
+                    if let Some((tool_name, params)) = tool_call.as_object().and_then(|obj| {
+                        obj.iter().find_map(|(k, v)| {
+                            if k == "tool" || k == "response" || k == "content" || k == "parameters" {
+                                return None;
+                            }
+                            if v.is_object() { Some((k.clone(), v.clone())) } else { None }
+                        })
+                    }) {
+                        let mut normalized = serde_json::Map::new();
+                        normalized.insert("tool".to_string(), serde_json::json!(tool_name));
+                        if let Some(params_obj) = params.as_object() {
+                            for (k, v) in params_obj {
+                                normalized.insert(k.clone(), v.clone());
+                            }
+                        }
+                        eprintln!("[LLM] Normalized nested JSON (extracted) to Format A: tool={}", tool_name);
+                        tool_call = serde_json::Value::Object(normalized);
+                    }
+                }
+
                 if let Some(raw_tool_name) = tool_call.get("tool").and_then(|v| v.as_str()) {
-                    let normalized_name = match raw_tool_name {
-                        "list_indexes" | "get_index" | "show_indexes" => "get_indexes",
-                        "list_foreign_keys" | "get_fk" => "get_foreign_keys",
-                        "show_constraints" => "get_constraints",
-                        "show_views" => "list_views",
-                        "show_procedures" => "list_procedures",
-                        "show_triggers" => "list_triggers",
-                        "get_stats" => "get_table_stats",
-                        "show_table_status" => "get_table_status",
-                        "get_info" => "get_server_info",
-                        "explain" => "explain_query",
-                        "check_security" => "security_check",
-                        "validate" => "validate_sql",
-                        "find_similar" => "find_similar_columns",
-                        "compare" => "compare_tables",
-                        "join" => "cross_db_join",
-                        _ => raw_tool_name,
-                    };
-
-                    let mut normalized_call = tool_call.clone();
-                    if let Some(obj) = normalized_call.as_object_mut() {
-                        obj.insert("tool".to_string(), serde_json::json!(normalized_name));
+                    // Validate parameter values — reject placeholder-like values
+                    let mut has_placeholder = false;
+                    if let Some(obj) = tool_call.as_object() {
+                        for (key, val) in obj {
+                            if key == "tool" { continue; }
+                            if let Some(s) = val.as_str() {
+                                let trimmed = s.trim();
+                                if trimmed.starts_with('<') && trimmed.ends_with('>') {
+                                    eprintln!("[LLM] Rejected placeholder param (extracted): {}={}", key, s);
+                                    let available_tables: Vec<String> = all_schemas.iter()
+                                        .map(|s| {
+                                            let tables: Vec<&str> = s.tables.iter().map(|t| t.name.as_str()).collect();
+                                            format!("{}.{{{}}}", s.database, tables.join(", "))
+                                        })
+                                        .collect();
+                                    let tables_hint = available_tables.join("; ");
+                                    conversation.push_str(&format!(
+                                        "\n\nTool error: Parameter '{}' has a placeholder value '{}'. \
+                                         You MUST use a REAL table name from: {}\n\
+                                         Call list_tables(database) first.",
+                                        key, s, tables_hint
+                                    ));
+                                    has_placeholder = true;
+                                    break;
+                                }
+                            }
+                        }
                     }
-                    let call_sig = normalized_call.to_string();
-
-                    if seen_tool_calls.contains(&call_sig) {
-                        eprintln!("[LLM] Repeated tool call (extracted, {normalized_name}), falling back with all schemas");
-                        let schema_context = if has_cross_db_relations {
-                            schema::format_schemas_with_relationships(all_schemas, &cross_db_relations)
-                        } else {
-                            schema::format_all_schemas_for_prompt(all_schemas)
+                    if has_placeholder {
+                        tool_continued = true;
+                    } else {
+                        let normalized_name = match raw_tool_name {
+                            "list_indexes" | "get_index" | "show_indexes" => "get_indexes",
+                            "list_foreign_keys" | "get_fk" => "get_foreign_keys",
+                            "show_constraints" => "get_constraints",
+                            "show_views" => "list_views",
+                            "show_procedures" => "list_procedures",
+                            "show_triggers" => "list_triggers",
+                            "get_stats" => "get_table_stats",
+                            "show_table_status" => "get_table_status",
+                            "get_info" => "get_server_info",
+                            "explain" => "explain_query",
+                            "check_security" => "security_check",
+                            "validate" => "validate_sql",
+                            "find_similar" => "find_similar_columns",
+                            "compare" => "compare_tables",
+                            "join" => "cross_db_join",
+                            "get_row_count" | "count_rows" => "get_table_row_count",
+                            "get_column_values" | "distinct_values" => "get_column_values",
+                            "get_recent" | "recent_data" => "get_recent_data",
+                            "search_data" | "search_table" => "search_data",
+                            "get_ddl" | "show_create_table" => "get_table_ddl",
+                            "get_variable" | "server_variable" => "get_variable",
+                            "get_privileges" | "user_privileges" => "get_user_privileges",
+                            "analyze_health" | "table_health" => "analyze_table_health",
+                            _ => raw_tool_name,
                         };
-                        let fallback_prompt = format!(
-                            "You are a MySQL 5.6+ expert. Given the database schema below, \
-                             write a SQL query to answer the user's question.\n\
-                             Only return the SQL query, no explanations, no markdown.\n\n\
-                             {schema_context}\n\n\
-                             User's question: {natural_language}\n\n\
-                             SQL Query:",
-                        );
-                        return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt).await.map(|sql| (sql, tool_steps.clone(), (iteration + 1) as u32));
-                    }
-                    seen_tool_calls.push(call_sig);
 
-                    let (maybe_sql, mut step) = process_tool_call(
-                        normalized_name,
-                        &tool_call,
-                        all_schemas,
-                        &db_list,
-                        &cross_db_relations,
-                        &mut conversation,
-                        natural_language,
-                        &url,
-                        &model,
-                        &client,
-                        &api_url,
-                    ).await?;
-                    step.iteration = (iteration + 1) as u32;
-                    tool_steps.push(step);
+                        let mut normalized_call = tool_call.clone();
+                        if let Some(obj) = normalized_call.as_object_mut() {
+                            obj.insert("tool".to_string(), serde_json::json!(normalized_name));
+                        }
+                        let call_sig = normalized_call.to_string();
 
-                    if let Some(sql) = maybe_sql {
-                        eprintln!("[LLM] Tool returned SQL directly");
-                        return Ok((sql, tool_steps, iteration as u32 + 1));
-                    }
-                    tool_continued = true;
+                        if seen_tool_calls.contains(&call_sig) {
+                            eprintln!("[LLM] Repeated tool call (extracted, {normalized_name}), falling back with all schemas");
+                            let schema_context = if has_cross_db_relations {
+                                schema::format_schemas_with_relationships(all_schemas, &cross_db_relations)
+                            } else {
+                                schema::format_all_schemas_for_prompt(all_schemas)
+                            };
+                            let fallback_prompt = format!(
+                                "You are a MySQL 5.6+ expert. Your ONLY job is to write a SELECT query that ANSWERS the user's question.\n\
+                                 \n\
+                                 STRICTLY FORBIDDEN — NEVER write these:\n\
+                                 - NEVER query information_schema\n\
+                                 - NEVER use SHOW commands (SHOW INDEX, SHOW CREATE TABLE, etc.)\n\
+                                 - NEVER use EXPLAIN\n\
+                                 - NEVER query mysql.* system tables\n\
+                                 \n\
+                                 ALLOWED — ONLY write: SELECT ... FROM actual_database.actual_table\n\n\
+                                 Database schema:\n\
+                                 {schema_context}\n\n\
+                                 User's question: {natural_language}\n\n\
+                                 Write a SELECT query that ANSWERS this question. ONLY return the SQL, no explanations:\n",
+                            );
+                            return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt).await.map(|sql| (sql, tool_steps.clone(), (iteration + 1) as u32));
+                        }
+                        seen_tool_calls.push(call_sig);
 
-                    // Track which tables have been explored
-                    if normalized_name == "get_table_schema" {
-                        if let Some(db) = tool_call.get("database").and_then(|v| v.as_str()) {
-                            if let Some(table) = tool_call.get("table").and_then(|v| v.as_str()) {
-                                schemas_explored.insert(format!("{db}.{table}"));
+                        let (maybe_sql, mut step) = process_tool_call(
+                            normalized_name,
+                            &tool_call,
+                            all_schemas,
+                            &db_list,
+                            &cross_db_relations,
+                            &mut conversation,
+                            natural_language,
+                            &url,
+                            &model,
+                            &client,
+                            &api_url,
+                        ).await?;
+                        step.iteration = (iteration + 1) as u32;
+                        tool_steps.push(step);
+
+                        if let Some(sql) = maybe_sql {
+                            eprintln!("[LLM] Tool returned SQL directly");
+                            return Ok((sql, tool_steps, iteration as u32 + 1));
+                        }
+                        tool_continued = true;
+
+                        // Track which tables have been explored
+                        if normalized_name == "get_table_schema" {
+                            if let Some(db) = tool_call.get("database").and_then(|v| v.as_str()) {
+                                if let Some(table) = tool_call.get("table").and_then(|v| v.as_str()) {
+                                    schemas_explored.insert(format!("{db}.{table}"));
+                                }
                             }
                         }
                     }
@@ -401,12 +588,13 @@ pub async fn natural_language_to_sql_with_tools(
                         };
                         let fallback_prompt = format!(
                             "You are a MySQL 5.6+ expert. Your previous query used column names that don't exist.\n\
-                             Given the database schema below, write a CORRECT SQL query.\n\
-                             ONLY use column names shown in the schema below.\n\
-                             Only return the SQL query, no explanations, no markdown.\n\n\
+                             \n\
+                             STRICTLY FORBIDDEN: NEVER query information_schema, NEVER use SHOW/EXPLAIN, NEVER query mysql.* tables.\n\
+                             ONLY write SELECT queries that produce application data answering the user's question.\n\n\
+                             Database schema (ONLY use column names shown here):\n\
                              {schema_context}\n\n\
                              User's question: {natural_language}\n\n\
-                             SQL Query:",
+                             Write a SELECT query that ANSWERS this question. ONLY return the SQL:\n",
                         );
                         return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt).await.map(|sql| (sql, tool_steps.clone(), (iteration + 1) as u32));
                     }
@@ -428,12 +616,14 @@ pub async fn natural_language_to_sql_with_tools(
             schema::format_all_schemas_for_prompt(all_schemas)
         };
         let fallback_prompt = format!(
-            "You are a MySQL 5.6+ expert. Given the database schema below, \
-             write a SQL query to answer the user's question.\n\
-             Only return the SQL query, no explanations, no markdown.\n\n\
+            "You are a MySQL 5.6+ expert. Your ONLY job is to write a SELECT query that ANSWERS the user's question.\n\
+             \n\
+             STRICTLY FORBIDDEN: NEVER query information_schema, NEVER use SHOW/EXPLAIN, NEVER query mysql.* tables.\n\
+             ONLY write: SELECT ... FROM actual_database.actual_table\n\n\
+             Database schema:\n\
              {schema_context}\n\n\
              User's question: {natural_language}\n\n\
-             SQL Query:",
+             Write a SELECT query that ANSWERS this question. ONLY return the SQL:\n",
         );
         return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt).await.map(|sql| (sql, tool_steps.clone(), (iteration + 1) as u32));
     }
@@ -559,6 +749,14 @@ async fn process_tool_call(
         "find_similar" => "find_similar_columns",
         "compare" => "compare_tables",
         "join" => "cross_db_join",
+        "get_row_count" | "count_rows" => "get_table_row_count",
+        "get_column_values" | "distinct_values" => "get_column_values",
+        "get_recent" | "recent_data" => "get_recent_data",
+        "search_data" | "search_table" => "search_data",
+        "get_ddl" | "show_create_table" => "get_table_ddl",
+        "get_variable" | "server_variable" => "get_variable",
+        "get_privileges" | "user_privileges" => "get_user_privileges",
+        "analyze_health" | "table_health" => "analyze_table_health",
         _ => tool_name,
     };
 
@@ -1167,14 +1365,194 @@ async fn process_tool_call(
             }
         }
 
+        "get_table_row_count" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            match schema::get_table_row_count(database, table).await {
+                Ok(count) => {
+                    let result = format!("Table {}.{} has approximately {} rows", database, table, count);
+                    conversation.push_str(&format!("\n\nTool result: {result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "get_column_values" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            let column = tool_call.get("column").and_then(|v| v.as_str()).unwrap_or("");
+            let limit = tool_call.get("limit").and_then(|v| v.as_str())
+                .and_then(|v| v.parse::<usize>().ok()).unwrap_or(20);
+
+            if column.is_empty() {
+                conversation.push_str(&format!("\n\nTool error: column parameter is required"));
+            } else {
+                match schema::get_column_distinct_values(database, table, column, limit).await {
+                    Ok(values) if values.is_empty() => {
+                        conversation.push_str(&format!("\n\nTool result: No distinct values found for {}.{}.{}", database, table, column));
+                    }
+                    Ok(values) => {
+                        let display: String = values.iter().take(10).map(|v| format!("  '{}'", v)).collect::<Vec<_>>().join("\n");
+                        let more_note = if values.len() > 10 { format!("\n... and {} more (showing first 10 of {})", values.len() - 10, values.len()) } else { "".to_string() };
+                        let result = format!("Distinct values for {}.{}.{} ({} total):\n{}\n{}", database, table, column, values.len(), display, more_note);
+                        conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                    }
+                    Err(e) => {
+                        conversation.push_str(&format!("\n\nTool error: {e}"));
+                    }
+                }
+            }
+        }
+
+        "get_recent_data" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            let limit = tool_call.get("limit").and_then(|v| v.as_str())
+                .and_then(|v| v.parse::<usize>().ok()).unwrap_or(5);
+
+            match schema::get_recent_data(database, table, limit).await {
+                Ok((_cols, rows)) if rows.is_empty() => {
+                    conversation.push_str(&format!("\n\nTool result: Table {}.{} is empty", database, table));
+                }
+                Ok((cols, rows)) => {
+                    let header = format!("Columns: {}", cols.join(", "));
+                    let data_rows: Vec<String> = rows.iter().map(|row| {
+                        format!("  ({})", row.iter().take(5).map(|v| {
+                            if v.len() > 30 { format!("{}...", &v[..30]) } else { v.clone() }
+                        }).collect::<Vec<_>>().join(", "))
+                    }).collect();
+                    let result = format!("Recent rows from {}.{} (showing {} of {}):\n{}\n{}", database, table, rows.len(), limit, header, data_rows.join("\n"));
+                    conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "search_data" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            let pattern = tool_call.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+
+            if pattern.is_empty() {
+                conversation.push_str(&format!("\n\nTool error: pattern parameter is required"));
+            } else {
+                match schema::search_table_data(database, table, pattern, None, 10).await {
+                    Ok((_cols, rows, _total)) if rows.is_empty() => {
+                        conversation.push_str(&format!("\n\nTool result: No rows matching '{}' found in {}.{}", pattern, database, table));
+                    }
+                    Ok((cols, rows, total)) => {
+                        let header = format!("Columns: {}", cols.join(", "));
+                        let data_rows: Vec<String> = rows.iter().map(|row| {
+                            format!("  ({})", row.iter().map(|v| {
+                                if v.len() > 30 { format!("{}...", &v[..30]) } else { v.clone() }
+                            }).collect::<Vec<_>>().join(", "))
+                        }).collect();
+                        let total_note = if total > 10 { format!("\nTotal matching rows: {} (showing first 10)", total) } else { "".to_string() };
+                        let result = format!("Search results for '{}' in {}.{} ({} found):\n{}\n{}{}", pattern, database, table, total, header, data_rows.join("\n"), total_note);
+                        conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                    }
+                    Err(e) => {
+                        conversation.push_str(&format!("\n\nTool error: {e}"));
+                    }
+                }
+            }
+        }
+
+        "get_table_ddl" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            match schema::get_table_ddl(database, table).await {
+                Ok(ddl) => {
+                    let result = format!("CREATE TABLE statement for {}.{}:\n{}", database, table, ddl);
+                    conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "get_variable" => {
+            let name = tool_call.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if name.is_empty() {
+                conversation.push_str(&format!("\n\nTool error: name parameter is required. Example: max_connections, innodb_buffer_pool_size"));
+            } else {
+                match schema::get_server_variable(name).await {
+                    Ok(value) => {
+                        let result = format!("MySQL variable '{}' = {}", name, value);
+                        conversation.push_str(&format!("\n\nTool result: {result}"));
+                    }
+                    Err(e) => {
+                        conversation.push_str(&format!("\n\nTool error: {e}"));
+                    }
+                }
+            }
+        }
+
+        "get_user_privileges" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let db = if database.is_empty() {
+                // Use first available database
+                all_schemas.first().map(|s| s.database.as_str()).unwrap_or("")
+            } else {
+                database
+            };
+            match schema::get_user_privileges(db).await {
+                Ok(privs) if privs.is_empty() => {
+                    conversation.push_str(&format!("\n\nTool result: No specific table privileges found for current user on {}", db));
+                }
+                Ok(privs) => {
+                    let display: String = privs.iter().take(10).map(|p| format!("  - {}", p)).collect::<Vec<_>>().join("\n");
+                    let more_note = if privs.len() > 10 { format!("\n... and {} more", privs.len() - 10) } else { "".to_string() };
+                    let result = format!("Privileges on {}:\n{}\n{}", db, display, more_note);
+                    conversation.push_str(&format!("\n\nTool result:\n{result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
+        "analyze_table_health" => {
+            let database = tool_call.get("database").and_then(|v| v.as_str()).unwrap_or("");
+            let table = tool_call.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            match schema::analyze_table_health(database, table).await {
+                Ok(health) => {
+                    let frag_status = if health.fragmentation_percent > 20.0 {
+                        "HIGH FRAGMENTATION - consider OPTIMIZE TABLE"
+                    } else if health.fragmentation_percent > 10.0 {
+                        "MODERATE FRAGMENTATION"
+                    } else {
+                        "HEALTHY"
+                    };
+                    let result = format!(
+                        "Health for {}.{}: Engine={} | Rows={} | Data={} bytes | Indexes={} bytes | Free={} bytes | Fragmentation={}%. Status: {}",
+                        database, table, health.engine, health.row_count,
+                        health.data_size_bytes, health.index_size_bytes,
+                        health.free_space_bytes, health.fragmentation_percent, frag_status
+                    );
+                    conversation.push_str(&format!("\n\nTool result: {result}"));
+                }
+                Err(e) => {
+                    conversation.push_str(&format!("\n\nTool error: {e}"));
+                }
+            }
+        }
+
         _ => {
             conversation.push_str(&format!(
                 "\n\nTool error: Unknown tool '{tool_name}'.\n\
-                 Available tools: list_tables, get_table_schema, get_sample_data, get_indexes, \
-                 get_foreign_keys, get_constraints, list_views, list_procedures, list_triggers, \
-                 get_table_stats, get_table_status, find_relationships, find_similar_columns, \
-                 compare_tables, cross_db_join, explain_query, security_check, validate_sql, \
-                 get_server_info"
+                 Available tools: list_tables, get_table_schema, get_sample_data, cross_db_join, \
+                 get_table_row_count, get_column_values, get_recent_data, search_data, \
+                 get_table_ddl, get_indexes, get_foreign_keys, get_constraints, \
+                 list_views, list_procedures, list_triggers, get_table_stats, get_table_status, \
+                 analyze_table_health, find_relationships, find_similar_columns, compare_tables, \
+                 get_server_info, get_variable, get_user_privileges, \
+                 explain_query, validate_sql, security_check"
             ));
         }
     }

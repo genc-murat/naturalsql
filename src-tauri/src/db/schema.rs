@@ -909,3 +909,324 @@ pub async fn get_table_status(database: &str, table: &str) -> Result<TableStatus
     }
 }
 
+/// Get approximate row count for a table (fast, uses table statistics)
+pub async fn get_table_row_count(database: &str, table: &str) -> Result<u64, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let count: Option<u64> = conn
+        .query_first(format!(
+            "SELECT TABLE_ROWS FROM information_schema.TABLES
+             WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}'",
+            database, table
+        ))
+        .await?;
+
+    Ok(count.unwrap_or(0))
+}
+
+/// Get distinct values for a column (with limit to prevent large results)
+pub async fn get_column_distinct_values(
+    database: &str,
+    table: &str,
+    column: &str,
+    limit: usize,
+) -> Result<Vec<String>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let values: Vec<String> = conn
+        .query_map(
+            format!(
+                "SELECT DISTINCT `{}` FROM `{}`.`{}`
+                 WHERE `{}` IS NOT NULL
+                 ORDER BY `{}`
+                 LIMIT {}",
+                column, database, table, column, column, limit
+            ),
+            |row: Row| {
+                let val: mysql_async::Value = row.get(0).unwrap_or(mysql_async::Value::NULL);
+                match val {
+                    mysql_async::Value::NULL => String::new(),
+                    mysql_async::Value::Bytes(b) => String::from_utf8_lossy(&b).to_string(),
+                    mysql_async::Value::Int(v) => v.to_string(),
+                    mysql_async::Value::UInt(v) => v.to_string(),
+                    mysql_async::Value::Float(v) => v.to_string(),
+                    mysql_async::Value::Double(v) => v.to_string(),
+                    _ => "?".to_string(),
+                }
+            },
+        )
+        .await?;
+
+    Ok(values)
+}
+
+/// Get recent data from a table (last N rows)
+pub async fn get_recent_data(
+    database: &str,
+    table: &str,
+    limit: usize,
+) -> Result<(Vec<String>, Vec<Vec<String>>), AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    // First, try to find a suitable ordering column (id, created_at, etc.)
+    let schema = load_cached_schema(database)?;
+    let ordering_col = if let Some(schema) = schema {
+        if let Some(tbl) = schema.tables.iter().find(|t| t.name == table) {
+            // Prefer: id, created_at, created_date, timestamp, or first PRIMARY KEY
+            let priority = ["id", "created_at", "created_date", "timestamp", "updated_at"];
+            let found = priority.iter().find(|&p| tbl.columns.iter().any(|c| c.name == *p));
+            if let Some(&col) = found {
+                col.to_string()
+            } else if let Some(pk) = tbl.columns.iter().find(|c| c.column_key == "PRI") {
+                pk.name.clone()
+            } else if !tbl.columns.is_empty() {
+                tbl.columns[0].name.clone()
+            } else {
+                return Err(AppError::QueryExecution(format!("Table {}.{} has no columns", database, table)));
+            }
+        } else {
+            return Err(AppError::QueryExecution(format!("Table {}.{} not found in cache", database, table)));
+        }
+    } else {
+        return Err(AppError::QueryExecution(format!("Database {} not cached", database)));
+    };
+
+    let query = format!(
+        "SELECT * FROM `{}`.`{}` ORDER BY `{}` DESC LIMIT {}",
+        database, table, ordering_col, limit
+    );
+
+    let rows: Vec<mysql_async::Row> = conn.query(&query).await?;
+    if rows.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let cols = rows[0].columns();
+    let col_names: Vec<String> = cols.as_ref().iter().map(|c| c.name_str().to_string()).collect();
+
+    let data_rows: Vec<Vec<String>> = rows.iter().map(|row| {
+        col_names.iter().enumerate().map(|(i, _)| {
+            match row.get_opt::<mysql_async::Value, usize>(i) {
+                Some(Ok(v)) => match v {
+                    mysql_async::Value::NULL => "NULL".to_string(),
+                    mysql_async::Value::Bytes(b) => String::from_utf8_lossy(&b).chars().take(50).collect(),
+                    mysql_async::Value::Int(v) => v.to_string(),
+                    mysql_async::Value::UInt(v) => v.to_string(),
+                    mysql_async::Value::Float(v) => v.to_string(),
+                    mysql_async::Value::Double(v) => v.to_string(),
+                    _ => "?".to_string(),
+                },
+                _ => "NULL".to_string(),
+            }
+        }).collect()
+    }).collect();
+
+    Ok((col_names, data_rows))
+}
+
+/// Search data in a table using LIKE pattern
+pub async fn search_table_data(
+    database: &str,
+    table: &str,
+    search_pattern: &str,
+    columns: Option<&[String]>,
+    limit: usize,
+) -> Result<(Vec<String>, Vec<Vec<String>>, usize), AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    // Get column names to search in
+    let schema = load_cached_schema(database)?;
+    let search_cols = if let Some(cols) = columns {
+        cols.to_vec()
+    } else if let Some(schema) = schema {
+        if let Some(tbl) = schema.tables.iter().find(|t| t.name == table) {
+            tbl.columns.iter().filter(|c| {
+                // Search in string columns only
+                c.column_type.to_lowercase().contains("char")
+                    || c.column_type.to_lowercase().contains("text")
+                    || c.column_type.to_lowercase().contains("varchar")
+            }).map(|c| c.name.clone()).collect()
+        } else {
+            return Err(AppError::QueryExecution(format!("Table {}.{} not found", database, table)));
+        }
+    } else {
+        return Err(AppError::QueryExecution(format!("Database {} not cached", database)));
+    };
+
+    if search_cols.is_empty() {
+        return Err(AppError::QueryExecution("No searchable columns found".to_string()));
+    }
+
+    // Build WHERE clause with LIKE for each column
+    let where_clause = search_cols.iter()
+        .map(|c| format!("`{}` LIKE '%{}%'", c, search_pattern.replace("'", "''")))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+
+    // Get total count
+    let count_query = format!(
+        "SELECT COUNT(*) FROM `{}`.`{}` WHERE {}",
+        database, table, where_clause
+    );
+    let total_count: Option<u64> = conn.query_first(&count_query).await?;
+    let total = total_count.unwrap_or(0) as usize;
+
+    // Get limited results
+    let data_query = format!(
+        "SELECT * FROM `{}`.`{}` WHERE {} LIMIT {}",
+        database, table, where_clause, limit
+    );
+    let rows: Vec<mysql_async::Row> = conn.query(&data_query).await?;
+
+    if rows.is_empty() {
+        return Ok((Vec::new(), Vec::new(), total));
+    }
+
+    let cols = rows[0].columns();
+    let col_names: Vec<String> = cols.as_ref().iter().map(|c| c.name_str().to_string()).collect();
+
+    let data_rows: Vec<Vec<String>> = rows.iter().map(|row| {
+        col_names.iter().enumerate().map(|(i, _)| {
+            match row.get_opt::<mysql_async::Value, usize>(i) {
+                Some(Ok(v)) => match v {
+                    mysql_async::Value::NULL => "NULL".to_string(),
+                    mysql_async::Value::Bytes(b) => String::from_utf8_lossy(&b).chars().take(50).collect(),
+                    mysql_async::Value::Int(v) => v.to_string(),
+                    mysql_async::Value::UInt(v) => v.to_string(),
+                    mysql_async::Value::Float(v) => v.to_string(),
+                    mysql_async::Value::Double(v) => v.to_string(),
+                    _ => "?".to_string(),
+                },
+                _ => "NULL".to_string(),
+            }
+        }).collect()
+    }).collect();
+
+    Ok((col_names, data_rows, total))
+}
+
+/// Get CREATE TABLE DDL for a table
+pub async fn get_table_ddl(database: &str, table: &str) -> Result<String, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    // SHOW CREATE TABLE returns two columns: Table and Create Table
+    // We need to extract the second column
+    let rows: Vec<mysql_async::Row> = conn
+        .query(format!("SHOW CREATE TABLE `{}`.`{}`", database, table))
+        .await?;
+
+    if let Some(row) = rows.into_iter().next() {
+        // Second column is the CREATE TABLE statement
+        match row.get_opt::<String, usize>(1) {
+            Some(Ok(ddl)) => Ok(ddl),
+            _ => Err(AppError::QueryExecution("Failed to get DDL".to_string())),
+        }
+    } else {
+        Err(AppError::QueryExecution(format!("Table {}.{} not found", database, table)))
+    }
+}
+
+/// Get MySQL server variable value
+pub async fn get_server_variable(name: &str) -> Result<String, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let value: Option<String> = conn
+        .query_first(format!(
+            "SELECT @@{}",
+            name
+        ))
+        .await?;
+
+    Ok(value.unwrap_or_else(|| "NULL".to_string()))
+}
+
+/// Get user privileges for current database
+pub async fn get_user_privileges(database: &str) -> Result<Vec<String>, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let privileges: Vec<String> = conn
+        .query_map(
+            format!(
+                "SELECT PRIVILEGE_TYPE, TABLE_NAME
+                 FROM information_schema.TABLE_PRIVILEGES
+                 WHERE TABLE_SCHEMA = '{}'
+                 ORDER BY TABLE_NAME, PRIVILEGE_TYPE",
+                database
+            ),
+            |row: Row| {
+                let priv_type: String = row.get(0).unwrap_or_default();
+                let table: String = row.get(1).unwrap_or_default();
+                format!("{} on {}", priv_type, table)
+            },
+        )
+        .await?;
+
+    if privileges.is_empty() {
+        // Fallback: try SHOW GRANTS
+        let grants: Vec<String> = conn
+            .query_map("SHOW GRANTS", |row: Row| {
+                row.get(0).unwrap_or_default()
+            })
+            .await?;
+        return Ok(grants);
+    }
+
+    Ok(privileges)
+}
+
+/// Analyze table health (fragmentation, engine info)
+pub async fn analyze_table_health(database: &str, table: &str) -> Result<TableHealth, AppError> {
+    let pool = get_pool().await?;
+    let mut conn = pool.get_conn().await?;
+
+    let rows: Vec<mysql_async::Row> = conn
+        .query(format!(
+            "SELECT ENGINE, TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH,
+                    DATA_FREE, AVG_ROW_LENGTH, DATA_FREE / DATA_LENGTH * 100 as frag_pct
+             FROM information_schema.TABLES
+             WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}'",
+            database, table
+        ))
+        .await?;
+
+    if let Some(row) = rows.into_iter().next() {
+        let engine: String = row.get(0).unwrap_or_default();
+        let data_rows: u64 = row.get(1).unwrap_or(0);
+        let data_length: u64 = row.get(2).unwrap_or(0);
+        let index_length: u64 = row.get(3).unwrap_or(0);
+        let data_free: u64 = row.get(4).unwrap_or(0);
+        let avg_row_length: u64 = row.get(5).unwrap_or(0);
+        let frag_pct: f64 = row.get(6).unwrap_or(0.0);
+
+        Ok(TableHealth {
+            engine,
+            row_count: data_rows,
+            data_size_bytes: data_length,
+            index_size_bytes: index_length,
+            free_space_bytes: data_free,
+            avg_row_length,
+            fragmentation_percent: frag_pct.round() as f64,
+        })
+    } else {
+        Err(AppError::QueryExecution(format!("Table {}.{} not found", database, table)))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableHealth {
+    pub engine: String,
+    pub row_count: u64,
+    pub data_size_bytes: u64,
+    pub index_size_bytes: u64,
+    pub free_space_bytes: u64,
+    pub avg_row_length: u64,
+    pub fragmentation_percent: f64,
+}
+
