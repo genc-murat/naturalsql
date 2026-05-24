@@ -125,9 +125,12 @@ pub async fn nl_to_sql(request: NlToSqlRequest) -> Result<NlToSqlResponse, AppEr
     }
 
     // Try tool-based approach first
+    // Pass the (previously ignored) database param to scope prompts and bias toward selected DB
+    let selected_db = if request.database.trim().is_empty() { None } else { Some(request.database.as_str()) };
     match llm::natural_language_to_sql_with_tools(
         &request.natural_language,
         &all_schemas,
+        selected_db,
     ).await {
         Ok((sql, tool_steps, iterations)) => {
             Ok(NlToSqlResponse {

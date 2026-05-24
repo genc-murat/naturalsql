@@ -66,13 +66,14 @@ pub async fn natural_language_to_sql(
 
     let ollama_response: OllamaResp = response.json().await?;
 
-    let sql = ollama_response.response.trim().to_string();
-    let sql = sql
-        .trim_start_matches("```sql")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim()
-        .to_string();
+    let raw = ollama_response.response.trim().to_string();
+    let sql = match sanitize_and_extract_sql(&raw, natural_language) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[LLM] sanitize_and_extract_sql rejected in simple path: {}", e);
+            return Err(AppError::InvalidLlmResponse);
+        }
+    };
 
     if sql.is_empty() {
         return Err(AppError::InvalidLlmResponse);
@@ -87,6 +88,7 @@ pub async fn natural_language_to_sql(
 pub async fn natural_language_to_sql_with_tools(
     natural_language: &str,
     all_schemas: &[Schema],
+    selected_database: Option<&str>,
 ) -> Result<(String, Vec<ToolCallStep>, u32), AppError> {
     let url = config::get_llm_url().await;
     let model = config::get_llm_model().await;
@@ -100,6 +102,8 @@ pub async fn natural_language_to_sql_with_tools(
 
     let db_names: Vec<&str> = all_schemas.iter().map(|s| s.database.as_str()).collect();
     let db_list = db_names.join(", ");
+
+    let current_database = selected_database.filter(|s| !s.trim().is_empty()).unwrap_or("");
 
     // Discover cross-database relationships
     // First, try to get actual FK constraints from MySQL
@@ -121,33 +125,66 @@ pub async fn natural_language_to_sql_with_tools(
 
     let has_cross_db_relations = !cross_db_relations.is_empty();
 
-    let mut seen_tool_calls: Vec<String> = Vec::new();
+    let mut seen_tool_calls: std::collections::HashMap<String, (String, u32)> = std::collections::HashMap::new();
     let mut conversation = String::new();
     let mut schemas_explored: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut data_tools_used: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut tool_steps: Vec<ToolCallStep> = Vec::new();
 
     for iteration in 0..max_iterations {
         eprintln!("[LLM] Tool iteration {}/{}", iteration + 1, max_iterations);
 
-        // Build available tables list for prompt
-        let available_tables_str: String = all_schemas.iter()
-            .map(|s| {
+        // Build available tables list for prompt (bias selected DB first)
+        let available_tables_str: String = {
+            let mut lines: Vec<String> = Vec::new();
+            if !current_database.is_empty() {
+                if let Some(s) = all_schemas.iter().find(|s| s.database == current_database) {
+                    let tables: Vec<&str> = s.tables.iter().map(|t| t.name.as_str()).collect();
+                    lines.push(format!("- {} (SELECTED / PREFERRED): {}", s.database, tables.join(", ")));
+                }
+            }
+            for s in all_schemas.iter().filter(|s| s.database != current_database) {
                 let tables: Vec<&str> = s.tables.iter().map(|t| t.name.as_str()).collect();
-                format!("- {}: {}", s.database, tables.join(", "))
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+                lines.push(format!("- {}: {}", s.database, tables.join(", ")));
+            }
+            if lines.is_empty() {
+                all_schemas.iter()
+                    .map(|s| {
+                        let tables: Vec<&str> = s.tables.iter().map(|t| t.name.as_str()).collect();
+                        format!("- {}: {}", s.database, tables.join(", "))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                lines.join("\n")
+            }
+        };
 
         let exploration_guidance = if schemas_explored.len() >= 2 {
             let tables_list = schemas_explored.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
-            format!("You already have schema for: {tables_list}. Write the SQL query NOW. Do NOT call any more schema tools.\n")
+            let data_note = if !data_tools_used.is_empty() {
+                let data_list = data_tools_used.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+                format!(" You have inspected data for: {data_list}. Write the FINAL SQL NOW using the tool results above — DO NOT repeat any get_recent_data/search_data/get_column_values/get_sample_data calls.")
+            } else { String::new() };
+            format!("You already have schema for: {tables_list}.{data_note} Write the SQL query NOW. Do NOT call any more schema or data tools.\n")
         } else if schemas_explored.len() == 1 {
             let table_name = schemas_explored.iter().next().unwrap();
-            format!("You already have schema for {table_name}. Get the SECOND table's schema with get_table_schema, or use cross_db_join. Do NOT call get_indexes or get_foreign_keys — you don't need them to write SQL.\n")
+            let data_note = if data_tools_used.iter().any(|d| d.starts_with(&format!("{}.", table_name.split('.').next().unwrap_or("")) )) { " You have recent/sample data. " } else { "" };
+            format!("You already have schema for {table_name}.{data_note} Get the SECOND table's schema with get_table_schema, or use cross_db_join. Do NOT call get_indexes or get_foreign_keys — you don't need them to write SQL.\n")
         } else {
+            let current_bias = if !current_database.is_empty() {
+                format!("\n**CURRENT DATABASE BIAS: Prefer tables from '{}' (SELECTED). Only use other DBs if you explicitly call find_relationships or cross_db_join first.**\n", current_database)
+            } else { String::new() };
             format!("RULE: You MUST call get_table_schema for each table BEFORE writing SQL. NEVER guess column names. Always use get_table_schema first.\n\n\
-                     **AVAILABLE TABLES (use these exact names, NEVER placeholders):**\n\
-                     {available_tables_str}\n")
+                      **AVAILABLE TABLES (use these exact names, NEVER placeholders):**\n\
+                      {available_tables_str}\n{current_bias}\n\
+                      After calling data tools (get_recent_data etc.) on a table, DO NOT call them again — immediately write the SQL using the 'Tool result' data shown above.")
+        };
+
+        let current_db_section = if !current_database.is_empty() {
+            format!("**CURRENT/SELECTED DATABASE: {}** — strongly prefer this DB's tables for queries unless the question requires cross-DB joins (in which case use find_relationships or cross_db_join tool explicitly).\n\n", current_database)
+        } else {
+            String::new()
         };
 
         // IMPORTANT: No angle-bracket placeholders like <table_name> — LLMs copy them verbatim.
@@ -214,19 +251,20 @@ pub async fn natural_language_to_sql_with_tools(
 
         let prompt = format!(
             "You are a MySQL expert. Available databases: {db_list}\n\n\
-             {tools_description}\n\n\
-             **STRICT RULES - FOLLOW EXACTLY:**\n\
-             1. NEVER invent table names, column names, or data values. ONLY use names returned by tools.\n\
-             2. ALWAYS call get_table_schema BEFORE writing any SQL query. NEVER guess column names.\n\
-             3. Use ONLY column names exactly as shown in schema results. Case-sensitive.\n\
-             4. If unsure about a table or column, say 'I need to check the schema first' and call the tool.\n\
-             5. When you have enough information, write ONLY the SQL query. No explanations, no markdown, no backticks.\n\
-             6. Always use fully qualified table names: database.table\n\
-             7. IMPORTANT: If you need a tool, output ONLY the JSON. If you're ready, output ONLY the SQL.\n\
-             8. Do NOT repeat the same tool call — use the results below to decide your next step.\n\
-             9. If a tool returns an error, try a different approach or ask the user for clarification.\n\n\
-             {conversation}\n\n\
-             User's question: {natural_language}",
+              {current_db_section}\
+              {tools_description}\n\n\
+              **STRICT RULES - FOLLOW EXACTLY:**\n\
+              1. NEVER invent table names, column names, or data values. ONLY use names returned by tools.\n\
+              2. ALWAYS call get_table_schema BEFORE writing any SQL query. NEVER guess column names.\n\
+              3. Use ONLY column names exactly as shown in schema results. Case-sensitive.\n\
+              4. If unsure about a table or column, call the tool (get_table_schema etc.). Do NOT emit any prose explaining your thought process or what you need to check.\n\
+              5. When you have enough information, write ONLY the SQL query. No explanations, no markdown, no backticks.\n\
+              6. Always use fully qualified table names: database.table\n\
+              7. IMPORTANT: If you need a tool, output ONLY the JSON. If you're ready, output ONLY the SQL.\n\
+              8. Do NOT repeat the same tool call — use the results below to decide your next step.\n\
+              9. If a tool returns an error, try a different approach or ask the user for clarification.\n\n\
+              {conversation}\n\n\
+              User's question: {natural_language}",
         );
 
         let response = client
@@ -381,41 +419,74 @@ pub async fn natural_language_to_sql_with_tools(
                 };
 
                 // Build a normalized signature for repeat detection
-                let mut normalized_call = tool_call.clone();
-                if let Some(obj) = normalized_call.as_object_mut() {
-                    obj.insert("tool".to_string(), serde_json::json!(normalized_name));
-                }
-                let call_sig = normalized_call.to_string();
+                let call_sig = make_canonical_tool_sig(normalized_name, &tool_call);
 
-                if seen_tool_calls.contains(&call_sig) {
-                    // Repeated call → fallback with ALL schemas for complete context
-                    eprintln!("[LLM] Repeated tool call ({normalized_name}), falling back with all schemas");
-                    let schema_context = if has_cross_db_relations {
-                        schema::format_schemas_with_relationships(all_schemas, &cross_db_relations)
-                    } else {
-                        schema::format_all_schemas_for_prompt(all_schemas)
-                    };
-                    let fallback_prompt = format!(
-                        "You are a MySQL 5.6+ expert. Your ONLY job is to write a SELECT query that ANSWERS the user's question.\n\
-                         \n\
-                         STRICTLY FORBIDDEN — NEVER write these:\n\
-                         - NEVER query information_schema (no information_schema.TABLES, COLUMNS, STATISTICS, etc.)\n\
-                         - NEVER use SHOW commands (SHOW INDEX, SHOW CREATE TABLE, SHOW GRANTS, etc.)\n\
-                         - NEVER use EXPLAIN\n\
-                         - NEVER query mysql.* system tables\n\
-                         \n\
-                         ALLOWED — ONLY write:\n\
-                         - SELECT ... FROM actual_database.actual_table\n\
-                         - Use ONLY column names shown in the schema below\n\
-                         \n\
-                         Database schema:\n\
-                         {schema_context}\n\n\
-                         User's question: {natural_language}\n\n\
-                         Write a SELECT query that ANSWERS this question. ONLY return the SQL, no explanations:\n",
-                    );
-                    return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt).await.map(|sql| (sql, tool_steps, (iteration + 1) as u32));
+                let mut call_count = 0;
+                let mut prev_result = String::new();
+                if let Some((res, count)) = seen_tool_calls.get(&call_sig) {
+                    call_count = *count;
+                    prev_result = res.clone();
                 }
-                seen_tool_calls.push(call_sig);
+
+                if call_count > 0 {
+                    let truncated_result = if prev_result.len() > 300 {
+                        format!("{}... [truncated]", &prev_result[..300])
+                    } else {
+                        prev_result.clone()
+                    };
+
+                    if call_count >= 2 {
+                        // Repeated call 2nd time → fallback with ALL schemas for complete context
+                        eprintln!("[LLM] Repeated tool call ({normalized_name}) second time, falling back with all schemas");
+                        let schema_context = if has_cross_db_relations {
+                            schema::format_schemas_with_relationships(all_schemas, &cross_db_relations)
+                        } else {
+                            schema::format_all_schemas_for_prompt(all_schemas)
+                        };
+                        let fallback_prompt = format!(
+                            "You are a MySQL 5.6+ expert. Your ONLY job is to write a SELECT query that ANSWERS the user's question.\n\
+                             \n\
+                             You already called the tool `{normalized_name}` and got:\n\
+                             {truncated_result}\n\
+                             Do NOT call this tool or any other tools again. You must write the final SQL query now.\n\
+                             \n\
+                             STRICTLY FORBIDDEN — NEVER write these:\n\
+                             - NEVER query information_schema (no information_schema.TABLES, COLUMNS, STATISTICS, etc.)\n\
+                             - NEVER use SHOW commands (SHOW INDEX, SHOW CREATE TABLE, SHOW GRANTS, etc.)\n\
+                             - NEVER use EXPLAIN\n\
+                             - NEVER query mysql.* system tables\n\
+                             \n\
+                             ALLOWED — ONLY write:\n\
+                             - SELECT ... FROM actual_database.actual_table\n\
+                             - Use ONLY column names shown in the schema below\n\
+                             \n\
+                             Database schema:\n\
+                             {schema_context}\n\n\
+                             User's question: {natural_language}\n\n\
+                             Write a SELECT query that ANSWERS this question. ONLY return the SQL, no explanations:\n",
+                        );
+                        return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt, natural_language).await.map(|sql| (sql, tool_steps, (iteration + 1) as u32));
+                    } else {
+                        // First repeat -> inject a strong warning note into conversation and continue
+                        eprintln!("[LLM] Repeated tool call ({normalized_name}) first time, injecting strong guidance note");
+                        let guidance = format!(
+                            "\n\n**CRITICAL WARNING:** You already called the tool `{normalized_name}` with these exact parameters and received:\n\
+                             ```\n\
+                             {}\n\
+                             ```\n\
+                             Do NOT call this tool or any other tools again. You already have enough information. Your NEXT action MUST be writing the final SQL query now.",
+                            truncated_result
+                        );
+                        conversation.push_str(&guidance);
+
+                        // Increment count in seen_tool_calls
+                        if let Some(entry) = seen_tool_calls.get_mut(&call_sig) {
+                            entry.1 += 1;
+                        }
+
+                        continue;
+                    }
+                }
 
                 let (maybe_sql, mut step) = process_tool_call(
                     normalized_name,
@@ -431,7 +502,9 @@ pub async fn natural_language_to_sql_with_tools(
                     &api_url,
                 ).await?;
                 step.iteration = (iteration + 1) as u32;
-                tool_steps.push(step);
+                tool_steps.push(step.clone());
+
+                seen_tool_calls.insert(call_sig, (step.result.clone(), 1));
 
                 if let Some(sql) = maybe_sql {
                     eprintln!("[LLM] Tool returned SQL directly");
@@ -446,6 +519,16 @@ pub async fn natural_language_to_sql_with_tools(
                             schemas_explored.insert(format!("{db}.{table}"));
                             eprintln!("[LLM] Explored schemas: {:?}", schemas_explored);
                         }
+                    }
+                }
+                // Track data tools to prevent repeat loops on get_recent_data etc.
+                if matches!(normalized_name, "get_recent_data" | "search_data" | "get_column_values" | "get_sample_data" | "get_table_row_count" | "count_nulls" | "get_column_stats") {
+                    if let (Some(db), Some(table)) = (
+                        tool_call.get("database").and_then(|v| v.as_str()),
+                        tool_call.get("table").and_then(|v| v.as_str())
+                    ) {
+                        data_tools_used.insert(format!("{db}.{table}"));
+                        eprintln!("[LLM] Data tools used for tables: {:?}", data_tools_used);
                     }
                 }
             }
@@ -553,37 +636,71 @@ pub async fn natural_language_to_sql_with_tools(
                             _ => raw_tool_name,
                         };
 
-                        let mut normalized_call = tool_call.clone();
-                        if let Some(obj) = normalized_call.as_object_mut() {
-                            obj.insert("tool".to_string(), serde_json::json!(normalized_name));
-                        }
-                        let call_sig = normalized_call.to_string();
+                        let call_sig = make_canonical_tool_sig(normalized_name, &tool_call);
 
-                        if seen_tool_calls.contains(&call_sig) {
-                            eprintln!("[LLM] Repeated tool call (extracted, {normalized_name}), falling back with all schemas");
-                            let schema_context = if has_cross_db_relations {
-                                schema::format_schemas_with_relationships(all_schemas, &cross_db_relations)
-                            } else {
-                                schema::format_all_schemas_for_prompt(all_schemas)
-                            };
-                            let fallback_prompt = format!(
-                                "You are a MySQL 5.6+ expert. Your ONLY job is to write a SELECT query that ANSWERS the user's question.\n\
-                                 \n\
-                                 STRICTLY FORBIDDEN — NEVER write these:\n\
-                                 - NEVER query information_schema\n\
-                                 - NEVER use SHOW commands (SHOW INDEX, SHOW CREATE TABLE, etc.)\n\
-                                 - NEVER use EXPLAIN\n\
-                                 - NEVER query mysql.* system tables\n\
-                                 \n\
-                                 ALLOWED — ONLY write: SELECT ... FROM actual_database.actual_table\n\n\
-                                 Database schema:\n\
-                                 {schema_context}\n\n\
-                                 User's question: {natural_language}\n\n\
-                                 Write a SELECT query that ANSWERS this question. ONLY return the SQL, no explanations:\n",
-                            );
-                            return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt).await.map(|sql| (sql, tool_steps.clone(), (iteration + 1) as u32));
+                        let mut call_count = 0;
+                        let mut prev_result = String::new();
+                        if let Some((res, count)) = seen_tool_calls.get(&call_sig) {
+                            call_count = *count;
+                            prev_result = res.clone();
                         }
-                        seen_tool_calls.push(call_sig);
+
+                        if call_count > 0 {
+                            let truncated_result = if prev_result.len() > 300 {
+                                format!("{}... [truncated]", &prev_result[..300])
+                            } else {
+                                prev_result.clone()
+                            };
+
+                            if call_count >= 2 {
+                                // Repeated call 2nd time → fallback with ALL schemas for complete context
+                                eprintln!("[LLM] Repeated tool call (extracted, {normalized_name}) second time, falling back with all schemas");
+                                let schema_context = if has_cross_db_relations {
+                                    schema::format_schemas_with_relationships(all_schemas, &cross_db_relations)
+                                } else {
+                                    schema::format_all_schemas_for_prompt(all_schemas)
+                                };
+                                let fallback_prompt = format!(
+                                    "You are a MySQL 5.6+ expert. Your ONLY job is to write a SELECT query that ANSWERS the user's question.\n\
+                                     \n\
+                                     You already called the tool `{normalized_name}` and got:\n\
+                                     {truncated_result}\n\
+                                     Do NOT call this tool or any other tools again. You must write the final SQL query now.\n\
+                                     \n\
+                                     STRICTLY FORBIDDEN — NEVER write these:\n\
+                                     - NEVER query information_schema\n\
+                                     - NEVER use SHOW commands (SHOW INDEX, SHOW CREATE TABLE, etc.)\n\
+                                     - NEVER use EXPLAIN\n\
+                                     - NEVER query mysql.* system tables\n\
+                                     \n\
+                                     ALLOWED — ONLY write: SELECT ... FROM actual_database.actual_table\n\n\
+                                     Database schema:\n\
+                                     {schema_context}\n\n\
+                                     User's question: {natural_language}\n\n\
+                                     Write a SELECT query that ANSWERS this question. ONLY return the SQL, no explanations:\n",
+                                );
+                                return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt, natural_language).await.map(|sql| (sql, tool_steps.clone(), (iteration + 1) as u32));
+                            } else {
+                                // First repeat -> inject a strong warning note into conversation and continue
+                                eprintln!("[LLM] Repeated tool call (extracted, {normalized_name}) first time, injecting strong guidance note");
+                                let guidance = format!(
+                                    "\n\n**CRITICAL WARNING:** You already called the tool `{normalized_name}` with these exact parameters and received:\n\
+                                     ```\n\
+                                     {}\n\
+                                     ```\n\
+                                     Do NOT call this tool or any other tools again. You already have enough information. Your NEXT action MUST be writing the final SQL query now.",
+                                    truncated_result
+                                );
+                                conversation.push_str(&guidance);
+
+                                // Increment count in seen_tool_calls
+                                if let Some(entry) = seen_tool_calls.get_mut(&call_sig) {
+                                    entry.1 += 1;
+                                }
+
+                                continue;
+                            }
+                        }
 
                         let (maybe_sql, mut step) = process_tool_call(
                             normalized_name,
@@ -599,7 +716,9 @@ pub async fn natural_language_to_sql_with_tools(
                             &api_url,
                         ).await?;
                         step.iteration = (iteration + 1) as u32;
-                        tool_steps.push(step);
+                        tool_steps.push(step.clone());
+
+                        seen_tool_calls.insert(call_sig, (step.result.clone(), 1));
 
                         if let Some(sql) = maybe_sql {
                             eprintln!("[LLM] Tool returned SQL directly");
@@ -615,6 +734,15 @@ pub async fn natural_language_to_sql_with_tools(
                                 }
                             }
                         }
+                        // Track data tools to prevent repeat loops on get_recent_data etc. (extracted path)
+                        if matches!(normalized_name, "get_recent_data" | "search_data" | "get_column_values" | "get_sample_data" | "get_table_row_count" | "count_nulls" | "get_column_stats") {
+                            if let (Some(db), Some(table)) = (
+                                tool_call.get("database").and_then(|v| v.as_str()),
+                                tool_call.get("table").and_then(|v| v.as_str())
+                            ) {
+                                data_tools_used.insert(format!("{db}.{table}"));
+                            }
+                        }
                     }
                 }
             }
@@ -624,8 +752,11 @@ pub async fn natural_language_to_sql_with_tools(
             continue;
         }
 
-        // Not a tool call — extract SQL
-        let sql = extract_sql(&text);
+        // Not a tool call — extract SQL (robust sanitize to block NL pollution)
+        let sql = sanitize_and_extract_sql(&text, natural_language).unwrap_or_else(|e| {
+            eprintln!("[LLM] sanitize rejected direct path: {}", e);
+            String::new()
+        });
 
         if !sql.is_empty() && !sql.starts_with('{') && !sql.contains("\"tool\":") {
             eprintln!("[LLM] Final SQL: {}", sql.chars().take(100).collect::<String>());
@@ -654,7 +785,7 @@ pub async fn natural_language_to_sql_with_tools(
                              User's question: {natural_language}\n\n\
                              Write a SELECT query that ANSWERS this question. ONLY return the SQL:\n",
                         );
-                        return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt).await.map(|sql| (sql, tool_steps.clone(), (iteration + 1) as u32));
+                        return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt, natural_language).await.map(|sql| (sql, tool_steps.clone(), (iteration + 1) as u32));
                     }
                     ValidationResult::TableNotFound => {
                         // Table not in cache, let it through (might be valid)
@@ -683,7 +814,7 @@ pub async fn natural_language_to_sql_with_tools(
              User's question: {natural_language}\n\n\
              Write a SELECT query that ANSWERS this question. ONLY return the SQL:\n",
         );
-        return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt).await.map(|sql| (sql, tool_steps.clone(), (iteration + 1) as u32));
+        return call_ollama_generate(&url, &model, &client, &api_url, &fallback_prompt, natural_language).await.map(|sql| (sql, tool_steps.clone(), (iteration + 1) as u32));
     }
 
     // Max iterations → fallback with all schemas
@@ -703,6 +834,7 @@ async fn call_ollama_generate(
     client: &reqwest::Client,
     api_url: &str,
     prompt: &str,
+    natural_language: &str,
 ) -> Result<String, AppError> {
     let response = client
         .post(api_url)
@@ -725,18 +857,22 @@ async fn call_ollama_generate(
     struct OllamaResp { response: String }
 
     let body: OllamaResp = response.json().await?;
-    let sql = body.response.trim()
-        .trim_start_matches("```sql")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim()
-        .to_string();
+    let raw = body.response.trim().to_string();
+
+    let sql = match sanitize_and_extract_sql(&raw, natural_language) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[LLM] sanitize_and_extract_sql rejected fallback output: {}", e);
+            // Return error so caller can surface clean failure instead of polluted SQL
+            return Err(AppError::InvalidLlmResponse);
+        }
+    };
 
     if sql.is_empty() {
         return Err(AppError::InvalidLlmResponse);
     }
 
-    eprintln!("[LLM] Fallback SQL: {}", sql.chars().take(100).collect::<String>());
+    eprintln!("[LLM] Fallback SQL (sanitized): {}", sql.chars().take(100).collect::<String>());
     Ok(sql)
 }
 
@@ -2260,4 +2396,96 @@ fn extract_sql(text: &str) -> String {
     }
 
     result.to_string()
+}
+
+/// Robust sanitizer + extractor used for ALL SQL-returning paths (including all fallbacks).
+/// Prevents NL text, Turkish fragments, "your_table", reasoning phrases from leaking into SQL.
+fn sanitize_and_extract_sql(raw: &str, original_nl: &str) -> Result<String, String> {
+    let mut sql = extract_sql(raw);
+
+    // Extra strip of leading reasoning if extract didn't catch
+    let mut cleaned_lines: Vec<&str> = Vec::new();
+    let mut in_sql = false;
+    for line in sql.lines() {
+        let t = line.trim();
+        if !in_sql {
+            let u = t.to_uppercase();
+            if u.starts_with("SELECT") || u.starts_with("INSERT") || u.starts_with("UPDATE")
+                || u.starts_with("DELETE") || u.starts_with("CREATE") || u.starts_with("DROP")
+                || u.starts_with("ALTER") || u.starts_with("WITH") || u.starts_with("EXPLAIN") {
+                in_sql = true;
+                cleaned_lines.push(line);
+            } else if t.is_empty() || t.starts_with("--") || t.contains("I need to check") || t.contains("your_table") || t.contains("```") {
+                continue;
+            } else {
+                continue; // drop leading prose
+            }
+        } else {
+            if t.starts_with('{') || t.starts_with("```") { break; }
+            cleaned_lines.push(line);
+        }
+    }
+    sql = cleaned_lines.join("\n").trim().to_string();
+
+    if sql.is_empty() {
+        return Err("No SQL statement found after stripping reasoning".to_string());
+    }
+
+    let sql_lower = sql.to_lowercase();
+    // Reject literal leaked phrases from rules or NL
+    let forbidden = [
+        "your_table", "your db", "<table_name>", "i need to check the schema first",
+        "say 'i need", "placeholder", "if other _claim", "bu tarz bir sorguda"
+    ];
+    for phrase in &forbidden {
+        if sql_lower.contains(phrase) {
+            return Err(format!("Contains forbidden/leaked text: '{}'", phrase));
+        }
+    }
+
+    // Cheap word-overlap rejection (defensive against mangled fallback)
+    let nl_tokens: Vec<String> = original_nl
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .map(|w| w.to_lowercase())
+        .filter(|w| w.len() > 4 && !["select","insert","update","delete","create","drop","alter","from","where","table","database","query","data","recent","claim","limit","order","group","join","inner","left","right","the","and","for","with","that","this","have","been","used"].contains(&w.as_str()))
+        .collect();
+    let n = nl_tokens.len();
+    if n >= 3 {
+        let hits = nl_tokens.iter().filter(|w| sql_lower.contains(w.as_str())).count();
+        let ratio = hits as f32 / n as f32;
+        if ratio > 0.30 {
+            return Err(format!("High NL word overlap ({:.0}% of {} distinctive words) — output rejected to prevent mangled SQL", ratio * 100.0, n));
+        }
+    }
+
+    // Final keyword start guard
+    let u = sql.to_uppercase();
+    if !(u.starts_with("SELECT") || u.starts_with("INSERT") || u.starts_with("UPDATE")
+        || u.starts_with("DELETE") || u.starts_with("CREATE") || u.starts_with("DROP")
+        || u.starts_with("ALTER") || u.starts_with("WITH")) {
+        return Err("Does not start with SELECT/INSERT/UPDATE/DELETE/CREATE/DROP/ALTER/WITH after sanitization".to_string());
+    }
+
+    Ok(sql)
+}
+
+/// Stable signature for repeat detection: "tool|sorted_key=val|..." (ignores JSON key order and Format A/B noise)
+fn make_canonical_tool_sig(tool: &str, val: &serde_json::Value) -> String {
+    let mut parts = vec![tool.trim().to_lowercase()];
+    if let Some(obj) = val.as_object() {
+        let mut keys: Vec<String> = obj.keys()
+            .filter(|k| *k != "tool")
+            .cloned()
+            .collect();
+        keys.sort();
+        for k in keys {
+            if let Some(v) = obj.get(&k) {
+                let s = v.as_str()
+                    .map(|ss| ss.to_string())
+                    .unwrap_or_else(|| v.to_string().trim_matches('"').to_string());
+                parts.push(format!("{}={}", k.trim().to_lowercase(), s.trim().to_lowercase()));
+            }
+        }
+    }
+    parts.join("|")
 }
