@@ -1,12 +1,8 @@
 import { useState, useEffect } from "react";
 import {
   X,
-  Plus,
-  Trash2,
   RefreshCw,
   Layout,
-  Maximize2,
-  Minimize2,
   AlertCircle,
   Loader2,
 } from "lucide-react";
@@ -152,7 +148,7 @@ function WidgetContent({ widget }: { widget: DashboardWidget }) {
   if (widget.type === "table") {
     return (
       <div className="h-full overflow-auto">
-        <ResultsTable result={widget.result} hideHeader dense />
+         <ResultsTable result={widget.result} hideHeader />
       </div>
     );
   }
