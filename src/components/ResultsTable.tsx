@@ -21,11 +21,11 @@ import {
   Clock,
 } from "lucide-react";
 import type { QueryResult } from "../types";
-import { ResultActions } from "./ResultActions";
 
 interface ResultsTableProps {
   result: QueryResult | null;
   onApplySql?: (sql: string) => void;
+  hideHeader?: boolean;
 }
 
 interface ContextMenuState {
@@ -35,7 +35,7 @@ interface ContextMenuState {
   column: string;
 }
 
-export function ResultsTable({ result, onApplySql }: ResultsTableProps) {
+export function ResultsTable({ result, onApplySql: _onApplySql, hideHeader }: ResultsTableProps) {
   const [sorting, setSorting] = useState<SortingState>([]);
   const [pageIndex, setPageIndex] = useState(0);
   const pageSize = 50;
@@ -132,8 +132,7 @@ export function ResultsTable({ result, onApplySql }: ResultsTableProps) {
 
   return (
     <div className="space-y-3">
-      {/* Results header with execution stats */}
-      <div className="flex items-center justify-between">
+      {!hideHeader && (<div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <span className="text-sm text-[var(--text-secondary)]">
             {isWrite
@@ -150,7 +149,7 @@ export function ResultsTable({ result, onApplySql }: ResultsTableProps) {
             Page {currentPage} of {totalPages}
           </span>
         )}
-      </div>
+      </div>)}
 
       {/* Table */}
       <div className="overflow-auto rounded-lg border border-[var(--border)]">
@@ -242,14 +241,6 @@ export function ResultsTable({ result, onApplySql }: ResultsTableProps) {
           </div>
         </div>
       )}
-
-      {/* AI Result Actions */}
-      <ResultActions
-        columns={result.columns}
-        rows={result.rows}
-        rowCount={result.row_count}
-        onApplySql={onApplySql || (() => {})}
-      />
 
       {/* Pagination */}
       {totalPages > 1 && (

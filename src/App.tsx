@@ -4,7 +4,7 @@ import { ThemeToggle } from "./components/ThemeToggle";
 import { ConnectionModal } from "./components/ConnectionModal";
 import { SchemaBrowser } from "./components/SchemaBrowser";
 import { QueryEditor } from "./components/QueryEditor";
-import { ResultsTable } from "./components/ResultsTable";
+import { ResultVisualization } from "./components/ResultVisualization";
 import { AnalysisChat } from "./components/AnalysisChat";
 import { LlmConfigPanel } from "./components/LlmConfigPanel";
 import {
@@ -35,10 +35,10 @@ function App() {
   const [showConnectionModal, setShowConnectionModal] = useState(false);
   const [llmConfig, setLlmConfig] = useState<LlmConfigResponse | null>(null);
   const [isConnected, setIsConnected] = useState(false);
-  const [editorHeight, setEditorHeight] = useState(280);
-  const [sidebarWidth, setSidebarWidth] = useState(288); // w-72 = 288px
-  const [isDragging, setIsDragging] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(288);
   const [isSidebarDragging, setIsSidebarDragging] = useState(false);
+  const [isEditorCollapsed, setIsEditorCollapsed] = useState(false);
   const mainAreaRef = useRef<HTMLDivElement>(null);
 
   // Load LLM config and cached databases on mount
@@ -47,38 +47,12 @@ function App() {
     listCachedDatabases().then((dbs) => setCachedDatabases(dbs)).catch(() => {});
   }, []);
 
-  // Resize drag handler for editor/results divider
-  useEffect(() => {
-    if (!isDragging) return;
-
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!mainAreaRef.current) return;
-      const rect = mainAreaRef.current.getBoundingClientRect();
-      const newHeight = e.clientY - rect.top;
-      setEditorHeight(Math.max(150, Math.min(600, newHeight)));
-    };
-
-    const handleMouseUp = () => setIsDragging(false);
-
-    window.addEventListener("mousemove", handleMouseMove);
-    window.addEventListener("mouseup", handleMouseUp);
-    document.body.style.userSelect = "none";
-    document.body.style.cursor = "row-resize";
-
-    return () => {
-      window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", handleMouseUp);
-      document.body.style.userSelect = "";
-      document.body.style.cursor = "";
-    };
-  }, [isDragging]);
-
-  // Sidebar resize drag handler
   useEffect(() => {
     if (!isSidebarDragging) return;
 
     const handleMouseMove = (e: MouseEvent) => {
-      setSidebarWidth(Math.max(200, Math.min(500, e.clientX)));
+      const offset = isSidebarCollapsed ? 0 : 0;
+      setSidebarWidth(Math.max(200, Math.min(500, e.clientX - offset)));
     };
 
     const handleMouseUp = () => setIsSidebarDragging(false);
@@ -94,7 +68,7 @@ function App() {
       document.body.style.userSelect = "";
       document.body.style.cursor = "";
     };
-  }, [isSidebarDragging]);
+  }, [isSidebarDragging, isSidebarCollapsed]);
 
   // Parse database name from connection string
   const parseDatabaseFromUrl = (url: string): string | null => {
@@ -270,76 +244,107 @@ function App() {
       {/* Main Content */}
       <div ref={mainAreaRef} className={`flex flex-1 overflow-hidden transition-all duration-300 ${showAnalysisChat ? "mr-96" : ""}`}>
         {/* Sidebar - Schema Browser */}
-        <aside
-          className="border-r border-[var(--border)] bg-[var(--bg-secondary)] flex flex-col shrink-0"
-          style={{ width: sidebarWidth }}
-        >
-          <div className="px-3 py-2 border-b border-[var(--border)]">
-            <h2 className="text-sm font-semibold text-[var(--text-secondary)]">
-              Databases
-            </h2>
-          </div>
-          <div className="flex-1 overflow-auto p-2">
-            <SchemaBrowser
-              schema={schema}
-              databases={databases}
-              cachedDatabases={cachedDatabases}
-              selectedDatabase={selectedDatabase}
-              onSelectDatabase={handleSelectDatabase}
-              onCacheDatabase={handleCacheDatabase}
-              onClearCache={handleClearCache}
-              onViewData={handleViewData}
-              isCaching={isCaching}
-              cachingDatabase={cachingDatabase}
-            />
-          </div>
-          {cacheError && (
-            <div className="p-3 border-t border-[var(--border)]">
-              <p className="text-xs text-[var(--error)] text-center">{cacheError}</p>
-            </div>
-          )}
-        </aside>
+        {!isSidebarCollapsed && (
+          <>
+            <aside
+              className="border-r border-[var(--border)] bg-[var(--bg-secondary)] flex flex-col shrink-0 transition-all duration-200"
+              style={{ width: sidebarWidth }}
+            >
+              <div className="px-3 py-2 border-b border-[var(--border)]">
+                <h2 className="text-sm font-semibold text-[var(--text-secondary)]">
+                  Databases
+                </h2>
+              </div>
+              <div className="flex-1 overflow-auto p-2">
+                <SchemaBrowser
+                  schema={schema}
+                  databases={databases}
+                  cachedDatabases={cachedDatabases}
+                  selectedDatabase={selectedDatabase}
+                  onSelectDatabase={handleSelectDatabase}
+                  onCacheDatabase={handleCacheDatabase}
+                  onClearCache={handleClearCache}
+                  onViewData={handleViewData}
+                  isCaching={isCaching}
+                  cachingDatabase={cachingDatabase}
+                />
+              </div>
+              {cacheError && (
+                <div className="p-3 border-t border-[var(--border)]">
+                  <p className="text-xs text-[var(--error)] text-center">{cacheError}</p>
+                </div>
+              )}
+            </aside>
 
-        {/* Vertical Resize Divider */}
-        <div
-          className="w-1.5 cursor-col-resize group flex flex-col items-center justify-center shrink-0 bg-[var(--border)] hover:bg-[var(--accent)]/30 transition-colors"
-          onMouseDown={() => setIsSidebarDragging(true)}
-        >
-          <div className="h-16 w-1 rounded-full bg-[var(--text-muted)]/40 group-hover:bg-[var(--accent)] transition-colors" />
-        </div>
+            <div
+              className="w-1.5 cursor-col-resize group flex flex-col items-center justify-center shrink-0 bg-[var(--border)] hover:bg-[var(--accent)]/30 transition-colors"
+              onMouseDown={() => setIsSidebarDragging(true)}
+            >
+              <div className="h-16 w-1 rounded-full bg-[var(--text-muted)]/40 group-hover:bg-[var(--accent)] transition-colors" />
+            </div>
+          </>
+        )}
 
         {/* Main Area */}
         <main className="flex-1 flex flex-col overflow-hidden">
-          {/* Query Editor Panel */}
-          <div className="flex flex-col bg-[var(--bg-primary)]" style={{ height: editorHeight }}>
-            <QueryEditor
-              onResult={handleResult}
-              schema={schema}
-              selectedDatabase={selectedDatabase}
-              tableNames={schema?.tables.map((t) => t.name) || []}
-              initialSql={pendingSql}
-            />
-          </div>
+          {/* Editor + Results Split */}
+          {!isEditorCollapsed ? (
+            <div className="flex flex-1 overflow-hidden">
+              {/* Left: Editor */}
+              <div className="flex flex-col border-r border-[var(--border)] shrink-0" style={{ width: "42%" }}>
+                <QueryEditor
+                  onResult={handleResult}
+                  schema={schema}
+                  selectedDatabase={selectedDatabase}
+                  tableNames={schema?.tables.map((t) => t.name) || []}
+                  initialSql={pendingSql}
+                  onCollapse={() => setIsEditorCollapsed(true)}
+                />
+              </div>
 
-          {/* Draggable Divider */}
-          <div
-            className="h-1.5 cursor-row-resize group flex items-center justify-center shrink-0 bg-[var(--border)] hover:bg-[var(--accent)]/30 transition-colors"
-            onMouseDown={() => setIsDragging(true)}
-          >
-            <div className="w-16 h-1 rounded-full bg-[var(--text-muted)]/40 group-hover:bg-[var(--accent)] transition-colors" />
-          </div>
-
-          {/* Results Panel */}
-          <div className="flex-1 min-h-0 overflow-auto p-3 bg-[var(--bg-primary)]">
-            <ResultsTable
-              result={queryResult}
-              onApplySql={(sql) => {
-                setPendingSql(sql);
-              }}
-            />
-          </div>
+              {/* Right: Results */}
+              <div className="flex-1 min-w-0 overflow-hidden bg-[var(--bg-primary)]">
+                <ResultVisualization
+                  result={queryResult}
+                  onApplySql={(sql) => setPendingSql(sql)}
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1 min-h-0 overflow-hidden bg-[var(--bg-primary)]">
+              <ResultVisualization
+                result={queryResult}
+                onApplySql={(sql) => {
+                  setPendingSql(sql);
+                  setIsEditorCollapsed(false);
+                }}
+              />
+            </div>
+          )}
         </main>
       </div>
+
+      {/* Collapsible Sidebar Toggle */}
+      <button
+        onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+        className="fixed left-0 top-1/2 -translate-y-1/2 z-30 p-1 rounded-r-md bg-[var(--bg-secondary)] border border-l-0 border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] transition-colors"
+        style={{ left: isSidebarCollapsed ? 0 : sidebarWidth + 6 }}
+        title={isSidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+      >
+        <ExternalLink className="w-3 h-3" />
+      </button>
+
+      {/* Editor Toggle (when collapsed) */}
+      {isEditorCollapsed && (
+        <button
+          onClick={() => setIsEditorCollapsed(false)}
+          className="fixed bottom-14 left-1/2 -translate-x-1/2 z-30 px-4 py-1.5 rounded-t-md bg-[var(--bg-secondary)] border border-b-0 border-[var(--border)] text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] transition-colors flex items-center gap-1.5"
+          title="Show editor"
+        >
+          <Database className="w-3 h-3" />
+          Show Editor
+        </button>
+      )}
 
       {/* Footer */}
       <footer className="px-4 py-2 border-t border-[var(--border)] bg-[var(--bg-secondary)] text-xs text-[var(--text-muted)] flex items-center justify-between">

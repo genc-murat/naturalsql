@@ -12,6 +12,7 @@ import {
   Play,
   Wand2,
   Maximize2,
+  Minimize2,
   X,
   AlertCircle,
   BookOpen,
@@ -31,6 +32,7 @@ interface QueryEditorProps {
   selectedDatabase: string | null;
   tableNames?: string[];
   initialSql?: string;
+  onCollapse?: () => void;
 }
 
 export function QueryEditor({
@@ -39,6 +41,7 @@ export function QueryEditor({
   selectedDatabase,
   tableNames = [],
   initialSql = "",
+  onCollapse,
 }: QueryEditorProps) {
   const [naturalLanguage, setNaturalLanguage] = useState("");
   const [sqlText, setSqlText] = useState("");
@@ -121,7 +124,7 @@ export function QueryEditor({
       setToolIterations(response.iterations);
       setToolFallback(response.used_fallback);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Translation failed");
+      setError(typeof err === "string" ? err : err instanceof Error ? err.message : "Translation failed");
     } finally {
       setIsTranslating(false);
     }
@@ -137,7 +140,7 @@ export function QueryEditor({
       const result = await executeSql({ sql: sqlText });
       onResult(result);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Query execution failed");
+      setError(typeof err === "string" ? err : err instanceof Error ? err.message : "Query execution failed");
     } finally {
       setIsExecuting(false);
     }
@@ -153,7 +156,7 @@ export function QueryEditor({
       const result = await explainSql({ sql: sqlText });
       onResult(result);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Explain failed");
+      setError(typeof err === "string" ? err : err instanceof Error ? err.message : "Explain failed");
     } finally {
       setIsExecuting(false);
     }
@@ -170,7 +173,7 @@ export function QueryEditor({
       const response = await explainSqlNatural({ sql: sqlText });
       setSqlExplanation(response.explanation);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to explain query");
+      setError(typeof err === "string" ? err : err instanceof Error ? err.message : "Failed to explain query");
     } finally {
       setIsExplaining(false);
     }
@@ -185,10 +188,8 @@ export function QueryEditor({
     try {
       const response = await fixSql({ sql: sqlText, error });
       setSqlFix({ fixed: response.fixed_sql, explanation: response.explanation });
-      // Auto-replace SQL with fixed version
       setSqlText(response.fixed_sql);
     } catch (err) {
-      // Keep the original error visible
     } finally {
       setIsFixing(false);
     }
@@ -203,12 +204,10 @@ export function QueryEditor({
     try {
       const response = await optimizeSql({ sql: sqlText });
       setSqlOptimization({ suggestions: response.suggestions, optimized_sql: response.optimized_sql });
-      // If there's an optimized version, replace the editor content
       if (response.optimized_sql) {
         setSqlText(response.optimized_sql);
       }
     } catch (err) {
-      // Keep any existing content
     } finally {
       setIsOptimizing(false);
     }
@@ -386,8 +385,8 @@ export function QueryEditor({
       <ToolCallTrace steps={toolSteps} iterations={toolIterations} usedFallback={toolFallback} />
 
       {/* Toolbar */}
-      <div className="flex items-center justify-between px-3 py-2 border-t border-[var(--border)] bg-[var(--bg-secondary)] shrink-0">
-        <div className="flex items-center gap-1">
+      <div className="flex items-center justify-between px-3 py-2 border-t border-[var(--border)] bg-[var(--bg-secondary)] shrink-0 gap-2 overflow-x-auto">
+        <div className="flex items-center gap-1 shrink-0">
           <button
             onClick={handleCopy}
             disabled={!sqlText}
@@ -414,69 +413,66 @@ export function QueryEditor({
           >
             <Maximize2 className="w-4 h-4" />
           </button>
+          {onCollapse && (
+            <button
+              onClick={onCollapse}
+              className="p-1.5 rounded-md hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] transition-colors"
+              title="Collapse editor (focus on results)"
+            >
+              <Minimize2 className="w-4 h-4" />
+            </button>
+          )}
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-[var(--text-muted)] flex items-center gap-1">
-            <kbd className="px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] border border-[var(--border)] text-[var(--text-secondary)] font-mono text-[10px]">
-              Ctrl
-            </kbd>
-            +
-            <kbd className="px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] border border-[var(--border)] text-[var(--text-secondary)] font-mono text-[10px]">
-              Enter
-            </kbd>
-            to run
-          </span>
+        <div className="flex items-center gap-1.5 flex-wrap justify-end">
           <button
             onClick={handleExplain}
             disabled={isExecuting || !sqlText.trim()}
-            className="px-3 py-1.5 rounded-md bg-[var(--bg-tertiary)] text-[var(--text-secondary)] text-sm font-medium hover:bg-[var(--border)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
-            title="Show execution plan"
+            className="p-1.5 rounded-md hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            title="EXPLAIN"
           >
             {isExecuting ? (
               <Loader2 className="w-4 h-4 animate-spin" />
             ) : (
               <AlertCircle className="w-4 h-4" />
             )}
-            EXPLAIN
           </button>
           <button
             onClick={handleExplainNatural}
             disabled={isExplaining || !sqlText.trim()}
-            className="px-3 py-1.5 rounded-md bg-[var(--bg-tertiary)] text-[var(--text-secondary)] text-sm font-medium hover:bg-[var(--border)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
-            title="Explain query in natural language"
+            className="p-1.5 rounded-md hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            title="AI Explain"
           >
             {isExplaining ? (
               <Loader2 className="w-4 h-4 animate-spin" />
             ) : (
               <BookOpen className="w-4 h-4" />
             )}
-            AI Explain
           </button>
           <button
             onClick={handleOptimize}
             disabled={isOptimizing || !sqlText.trim()}
-            className="px-3 py-1.5 rounded-md bg-[var(--bg-tertiary)] text-[var(--text-secondary)] text-sm font-medium hover:bg-[var(--border)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
-            title="Analyze and optimize query"
+            className="p-1.5 rounded-md hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            title="Optimize"
           >
             {isOptimizing ? (
               <Loader2 className="w-4 h-4 animate-spin" />
             ) : (
               <Zap className="w-4 h-4" />
             )}
-            Optimize
           </button>
           <button
             onClick={() => setShowJoinBuilder(true)}
-            className="px-3 py-1.5 rounded-md bg-[var(--bg-tertiary)] text-[var(--text-secondary)] text-sm font-medium hover:bg-[var(--border)] transition-colors flex items-center gap-1.5"
-            title="Build JOIN queries visually"
+            className="p-1.5 rounded-md hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] transition-colors"
+            title="Join Builder"
           >
             <GitBranch className="w-4 h-4" />
-            Join Builder
           </button>
+          <div className="w-px h-5 bg-[var(--border)] mx-0.5" />
           <button
             onClick={handleExecute}
             disabled={isExecuting || !sqlText.trim()}
-            className="px-4 py-1.5 rounded-md bg-[var(--success)] text-white text-sm font-medium hover:bg-green-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+            className="px-3 py-1.5 rounded-md bg-[var(--success)] text-white text-sm font-medium hover:bg-green-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5 shrink-0"
+            title="Run (Ctrl+Enter)"
           >
             {isExecuting ? (
               <Loader2 className="w-4 h-4 animate-spin" />
